@@ -64,7 +64,7 @@ class Schemati_GitHub_Updater {
             // Initialize updater with your GitHub repository details
             $this->github_updater = new Schemati_GitHub_Updater(
                 SCHEMATI_FILE,           // Plugin file path
-                'your-github-username',   // Replace with your GitHub username
+                'SchemaMarkApp',   // Replace with your GitHub username
                 'Schemati-2.0',              // Replace with your repository name
                 ''                       // Optional: GitHub personal access token for private repos
             );

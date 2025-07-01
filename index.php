@@ -24,16 +24,14 @@ define('SCHEMATI_VERSION', '5.0.0');
 define('SCHEMATI_FILE', __FILE__);
 define('SCHEMATI_DIR', plugin_dir_path(__FILE__));
 define('SCHEMATI_URL', plugin_dir_url(__FILE__));
-// Force early text domain loading
-add_action('plugins_loaded', function() {
-    load_plugin_textdomain('schemati', false, dirname(plugin_basename(__FILE__)) . '/languages');
-}, 1); // Priority 1 = very early
+// Force early text domain loading // Priority 1 = very early
 /**
  * Main Schemati Plugin Class
  */
 class Schemati {
     
     private static $instance = null;
+    private $github_updater;
     
     public static function instance() {
         if (null === self::$instance) {
@@ -44,7 +42,6 @@ class Schemati {
     
     private function __construct() {
     // Load text domain immediately
-    $this->load_textdomain();
     $this->init();
 }
     
@@ -54,9 +51,8 @@ class Schemati {
     public function init() {
         // Activation/Deactivation hooks
         register_activation_hook(__FILE__, array($this, 'activate'));
-        register_deactivation_hook(__FILE__, array($this, 'deactivate'));
-        
-        // Core hooks
+        register_deactivation_hook(__FILE__, array($this, 'deactivate'));        // Core hooks
+        $this->init_github_updater();
         add_action('wp_head', array($this, 'output_schema'), 1);
         
         // Admin hooks
@@ -956,7 +952,7 @@ class Schemati {
         add_submenu_page('schemati', __('Product Schema', 'schemati'), __('Product', 'schemati'), 'manage_options', 'schemati-product', array($this, 'product_page'));
         add_submenu_page('schemati', __('FAQ Schema', 'schemati'), __('FAQ', 'schemati'), 'manage_options', 'schemati-faq', array($this, 'faq_page'));
         add_submenu_page('schemati', __('CheckTool', 'schemati'), __('CheckTool', 'schemati'), 'manage_options', 'schemati-tools', array($this, 'tools_page'));
-        add_submenu_page('schemati', __('License', 'schemati'), __('License', 'schemati'), 'manage_options', 'schemati-license', array($this, 'license_page'));
+        add_submenu_page('schemati', __('Updates', 'schemati'), __('Updates', 'schemati'), 'manage_options', 'schemati-updates', array($this, 'updates_page'));
     }
     
     /**
@@ -1013,9 +1009,6 @@ class Schemati {
      * General Settings Page
      */
     public function general_page() {
-
-        unload_textdomain('schemati');
-        load_textdomain('schemati', dirname(__FILE__) . '/languages/schemati-he_IL.mo');
         
         $this->handle_form_submission('schemati_general');
         $settings = $this->get_settings('schemati_general');
@@ -1023,27 +1016,6 @@ class Schemati {
         ?>
         <div class="wrap">
             <div class="wrap">
-<p style="background: yellow; padding: 10px;">
-    Test Translation: "<?php _e('General Settings', 'schemati'); ?>" | 
-    Locale: <?php echo get_locale(); ?> | 
-    Text Domain Loaded: <?php echo is_textdomain_loaded('schemati') ? 'YES' : 'NO'; ?>
-</p>
-<p style="background: lightblue; padding: 10px;">
-    Direct test: <?php echo __('General Settings', 'schemati'); ?> |
-    Force reload: <?php 
-    unload_textdomain('schemati'); 
-    load_textdomain('schemati', dirname(__FILE__) . '/languages/schemati-he_IL.mo');
-    echo __('General Settings', 'schemati'); 
-    ?>
-</p>
-<p style="background: lightblue; padding: 10px;">
-    Direct test: <?php echo __('General Settings', 'schemati'); ?> |
-    Force reload: <?php 
-    unload_textdomain('schemati'); 
-    load_textdomain('schemati', dirname(__FILE__) . '/languages/schemati-he_IL.mo');
-    echo __('General Settings', 'schemati'); 
-    ?>
-</p>
             <h1><?php _e('Schemati - General Settings', 'schemati'); ?></h1>
             
             <?php if (get_transient('schemati_activated')): ?>
@@ -1341,30 +1313,6 @@ class Schemati {
         <?php
     }
     
-    /**
-     * License Page
-     */
-    public function license_page() {
-        ?>
-        <div class="wrap">
-            <h1><?php _e('Schemati License', 'schemati'); ?></h1>
-            
-            <div class="card">
-                <h2><?php _e('License Information', 'schemati'); ?></h2>
-                <p><?php _e('Schemati v5.0 is licensed under GPL v2 or later.', 'schemati'); ?></p>
-                <p><?php _e('This plugin is free and open source.', 'schemati'); ?></p>
-                
-                <h3><?php _e('Plugin Details', 'schemati'); ?></h3>
-                <ul>
-                    <li><strong><?php _e('Version:', 'schemati'); ?></strong> <?php echo SCHEMATI_VERSION; ?></li>
-                    <li><strong><?php _e('Author:', 'schemati'); ?></strong> Shay Ohayon</li>
-                    <li><strong><?php _e('Website:', 'schemati'); ?></strong> <a href="https://schemamarkapp.com" target="_blank">schemamarkapp.com</a></li>
-                    <li><strong><?php _e('License:', 'schemati'); ?></strong> GPL v2 or later</li>
-                </ul>
-            </div>
-        </div>
-        <?php
-    }
     
     /**
      * Generic schema page template
@@ -2977,6 +2925,51 @@ console.log('Schemati: Template functions loaded');
         
         return $html;
     }
+    /**
+ * Updates management page
+ */
+public function updates_page() {
+    $remote_version = ($this->github_updater) ? $this->github_updater->get_remote_version() : null;
+    $current_version = SCHEMATI_VERSION;
+    $update_available = $remote_version && version_compare($current_version, $remote_version, '<');
+    
+    ?>
+    <div class="wrap">
+        <h1><?php _e('Schemati - Updates', 'schemati'); ?></h1>
+        
+        <div class="card">
+            <h2><?php _e('Version Information', 'schemati'); ?></h2>
+            <table class="form-table">
+                <tr>
+                    <th scope="row"><?php _e('Current Version', 'schemati'); ?></th>
+                    <td>
+                        <strong><?php echo esc_html($current_version); ?></strong>
+                        <?php if ($update_available): ?>
+                            <span style="color: #d63384; margin-left: 10px;">
+                                <?php _e('(Update Available)', 'schemati'); ?>
+                            </span>
+                        <?php else: ?>
+                            <span style="color: #198754; margin-left: 10px;">
+                                <?php _e('(Up to Date)', 'schemati'); ?>
+                            </span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><?php _e('Latest Version', 'schemati'); ?></th>
+                    <td>
+                        <?php if ($remote_version): ?>
+                            <strong><?php echo esc_html($remote_version); ?></strong>
+                        <?php else: ?>
+                            <em><?php _e('Unable to check', 'schemati'); ?></em>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            </table>
+        </div>
+    </div>
+    <?php
+}
 
     /**
      * Frontend styles for breadcrumbs
@@ -3017,6 +3010,33 @@ console.log('Schemati: Template functions loaded');
         </style>
         <?php
     }
+    /**
+ * Initialize GitHub updater
+ */
+private function init_github_updater() {
+    // Check if the updater file exists
+    $updater_file = SCHEMATI_DIR . 'includes/class-github-updater.php';
+    
+    if (!file_exists($updater_file)) {
+        return; // Skip if file doesn't exist
+    }
+    
+    // Include the GitHub updater class
+    require_once $updater_file;
+    
+    // Check if class exists
+    if (!class_exists('Schemati_GitHub_Updater')) {
+        return; // Skip if class doesn't exist
+    }
+    
+    // Initialize updater
+    $this->github_updater = new Schemati_GitHub_Updater(
+        SCHEMATI_FILE,                // Plugin file path
+        'SchemaMarkApp',       // Replace with your GitHub username
+        'schemati-2.0',                  // Replace with your repository name
+        ''                           // Optional: GitHub personal access token
+    );
+}
 }
 
 // Initialize the plugin

@@ -1013,6 +1013,9 @@ class Schemati {
      * General Settings Page
      */
     public function general_page() {
+
+        unload_textdomain('schemati');
+        load_textdomain('schemati', dirname(__FILE__) . '/languages/schemati-he_IL.mo');
         
         $this->handle_form_submission('schemati_general');
         $settings = $this->get_settings('schemati_general');

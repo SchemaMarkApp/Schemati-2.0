@@ -42,6 +42,7 @@ class Schemati {
     
     private function __construct() {
     // Load text domain immediately
+    add_action('init', array($this, 'load_textdomain'), 1);
     $this->init();
 }
     
@@ -87,32 +88,53 @@ class Schemati {
      * AJAX handler to toggle schema status
      */
     public function ajax_toggle_schema() {
-        check_ajax_referer('schemati_ajax', 'nonce');
-        
-        if (!current_user_can('edit_posts')) {
-            wp_die('Insufficient permissions');
-        }
-        
-        $schema_index = intval($_POST['schema_index']);
-        $post_id = intval($_POST['post_id']);
-        
-        if (!$post_id) {
-            wp_send_json_error('No post ID provided');
-        }
-        
-        $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
-        if (!is_array($custom_schemas)) {
-            $custom_schemas = array();
-        }
-        
-        if (isset($custom_schemas[$schema_index])) {
-            $custom_schemas[$schema_index]['_enabled'] = !($custom_schemas[$schema_index]['_enabled'] ?? true);
-            update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas);
-            wp_send_json_success('Schema status updated');
-        }
-        
-        wp_send_json_error('Schema not found');
+    // Verify nonce
+    if (!check_ajax_referer('schemati_ajax', 'nonce', false)) {
+        wp_send_json_error('Invalid nonce');
+        return;
     }
+    
+    // Check permissions
+    if (!current_user_can('edit_posts')) {
+        wp_send_json_error('Insufficient permissions');
+        return;
+    }
+    
+    // Validate inputs
+    $schema_index = isset($_POST['schema_index']) ? intval($_POST['schema_index']) : -1;
+    $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+    
+    if ($schema_index < 0) {
+        wp_send_json_error('Invalid schema index');
+        return;
+    }
+    
+    if (!$post_id) {
+        wp_send_json_error('No post ID provided');
+        return;
+    }
+    
+    // Get and validate schemas
+    $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
+    if (!is_array($custom_schemas)) {
+        $custom_schemas = array();
+    }
+    
+    if (!isset($custom_schemas[$schema_index])) {
+        wp_send_json_error('Schema not found');
+        return;
+    }
+    
+    // Toggle status
+    $custom_schemas[$schema_index]['_enabled'] = !($custom_schemas[$schema_index]['_enabled'] ?? true);
+    
+    // Save
+    if (update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas)) {
+        wp_send_json_success('Schema status updated');
+    } else {
+        wp_send_json_error('Failed to update schema');
+    }
+}
 
     /**
      * AJAX handler to delete schema
@@ -571,201 +593,158 @@ class Schemati {
     }
 
         private function get_schema_template_html($schema_type) {
-        ob_start();
-        
-        switch ($schema_type) {
-            case 'LocalBusiness':
-                ?>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Business Name:</label>
-                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+    ob_start();
+    
+    switch ($schema_type) {
+        case 'LocalBusiness':
+            ?>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Business Name:</label>
+                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Address:</label>
+                <textarea name="address" rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
+                    <input type="text" name="telephone" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                 </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
+                    <input type="email" name="email" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                 </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Address:</label>
-                    <textarea name="address" rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website URL:</label>
+                <input type="url" name="url" value="<?php echo esc_url(get_permalink()); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <?php
+            break;
+            
+        case 'Service':
+            ?>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Service Name:</label>
+                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Area Served:</label>
+                <input type="text" name="area_served" placeholder="e.g., New York, NY" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <?php
+            break;
+            
+        case 'Product':
+            ?>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Product Name:</label>
+                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Brand:</label>
+                <input type="text" name="brand" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Price:</label>
+                    <input type="number" name="price" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                 </div>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
-                        <input type="text" name="telephone" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    </div>
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
-                        <input type="email" name="email" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    </div>
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Currency:</label>
+                    <select name="currency" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        <option value="USD">USD</option>
+                        <option value="EUR">EUR</option>
+                        <option value="GBP">GBP</option>
+                        <option value="CAD">CAD</option>
+                    </select>
                 </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website URL:</label>
-                    <input type="url" name="url" value="<?php echo esc_url(get_permalink()); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <?php
+            break;
+            
+        case 'HowTo':
+            ?>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">How-To Title:</label>
+                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Total Time (e.g., PT30M):</label>
+                <input type="text" name="total_time" placeholder="PT30M" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Steps (one per line):</label>
+                <textarea name="steps[]" rows="4" placeholder="Enter each step on a new line" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <?php
+            break;
+            
+        case 'Recipe':
+            ?>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Recipe Name:</label>
+                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Prep Time:</label>
+                    <input type="text" name="prep_time" placeholder="PT15M" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                 </div>
-                <?php
-                break;
-                
-            case 'Service':
-                ?>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Service Name:</label>
-                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Cook Time:</label>
+                    <input type="text" name="cook_time" placeholder="PT30M" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                 </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Area Served:</label>
-                    <input type="text" name="area_served" placeholder="e.g., New York, NY" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <?php
-                break;
-                
-            case 'Product':
-                ?>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Product Name:</label>
-                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Brand:</label>
-                    <input type="text" name="brand" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Price:</label>
-                        <input type="number" name="price" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    </div>
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Currency:</label>
-                        <select name="currency" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                            <option value="USD">USD</option>
-                            <option value="EUR">EUR</option>
-                            <option value="GBP">GBP</option>
-                            <option value="CAD">CAD</option>
-                        </select>
-                    </div>
-                </div>
-                <?php
-                break;
-                
-            case 'Event':
-                ?>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Event Name:</label>
-                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-                </div>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Start Date:</label>
-                        <input type="datetime-local" name="start_date" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    </div>
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">End Date:</label>
-                        <input type="datetime-local" name="end_date" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    </div>
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Location:</label>
-                    <input type="text" name="location" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <?php
-                break;
-                
-            case 'Person':
-                ?>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Full Name:</label>
-                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Job Title:</label>
-                    <input type="text" name="job_title" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
-                        <input type="email" name="email" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    </div>
-                    <div style="flex: 1;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
-                        <input type="text" name="telephone" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    </div>
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website:</label>
-                    <input type="url" name="url" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <?php
-                break;
-                
-            case 'FAQPage':
-                ?>
-                <div id="faq-questions">
-                    <div style="margin-bottom: 15px;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Question 1:</label>
-                        <input type="text" name="questions[]" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 5px;">
-                        <textarea name="answers[]" placeholder="Answer..." rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-                    </div>
-                </div>
-                <button type="button" onclick="addFAQQuestion()" style="background: #0073aa; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; margin-bottom: 15px;">
-                    + Add Another Question
-                </button>
-                <script>
-                function addFAQQuestion() {
-                    var container = document.getElementById('faq-questions');
-                    var questionNum = container.children.length + 1;
-                    var html = '<div style="margin-bottom: 15px;">' +
-                        '<label style="display: block; margin-bottom: 5px; font-weight: 500;">Question ' + questionNum + ':</label>' +
-                        '<input type="text" name="questions[]" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 5px;">' +
-                        '<textarea name="answers[]" placeholder="Answer..." rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>' +
-                        '</div>';
-                    container.insertAdjacentHTML('beforeend', html);
-                }
-                </script>
-                <?php
-                break;
-                
-            // Include the HowTo, Recipe, VideoObject, Review cases from your existing code...
-            case 'HowTo':
-                // (Your existing HowTo template code here)
-                ?>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">How-To Title:</label>
-                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-                </div>
-                <!-- Include rest of HowTo template -->
-                <?php
-                break;
-                
-            default:
-                ?>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Name:</label>
-                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-                </div>
-                <?php
-        }
-        
-        return ob_get_clean();
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Ingredients (one per line):</label>
+                <textarea name="ingredients[]" rows="4" placeholder="Enter each ingredient on a new line" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Instructions (one per line):</label>
+                <textarea name="instructions[]" rows="4" placeholder="Enter each instruction on a new line" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <?php
+            break;
+            
+        // Add other cases as needed...
+            
+        default:
+            ?>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Name:</label>
+                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+            </div>
+            <?php
     }
+    
+    return ob_get_clean();
+}
 
     /**
      * Helper methods for building schemas
@@ -884,6 +863,8 @@ class Schemati {
             load_textdomain('schemati', $mo_file);
         }
     }
+    
+    return $loaded;
 }
     
     /**
@@ -1839,6 +1820,182 @@ class Schemati {
                     detectedSchemas.push(domSchema);
                 }
             });
+        function refreshSchemas() {
+    syncSchemasWithDOM();
+}
+
+// Add new schema
+function addNewSchema() {
+    var form = document.querySelector('#new-schema-form form');
+    if (!form) {
+        alert('Form not found');
+        return;
+    }
+    
+    var formData = new FormData(form);
+    var schemaType = document.getElementById('new-schema-type').value;
+    
+    if (!schemaType) {
+        alert('Please select a schema type');
+        return;
+    }
+    
+    // Convert FormData to regular object
+    var data = {
+        action: 'schemati_add_schema',
+        schema_type: schemaType,
+        post_id: currentPostId,
+        nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
+    };
+    
+    // Add form fields to data
+    for (var pair of formData.entries()) {
+        data[pair[0]] = pair[1];
+    }
+    
+    jQuery.ajax({
+        url: '<?php echo admin_url("admin-ajax.php"); ?>',
+        type: 'POST',
+        data: data,
+        success: function(response) {
+            if (response.success) {
+                alert('Schema added successfully!');
+                form.reset();
+                document.getElementById('new-schema-form').style.display = 'none';
+                document.getElementById('new-schema-type').value = '';
+                syncSchemasWithDOM();
+            } else {
+                alert('Error: ' + (response.data || 'Unknown error'));
+            }
+        },
+        error: function() {
+            alert('Connection error. Please try again.');
+        }
+    });
+}
+
+// Save schema changes
+function saveSchemaChanges(index) {
+    var form = document.querySelector('#schema-editor-' + index + ' form');
+    if (!form) return;
+    
+    var formData = new FormData(form);
+    var data = {
+        action: 'schemati_save_schema',
+        schema_index: index,
+        post_id: currentPostId,
+        nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
+    };
+    
+    // Add form fields
+    for (var pair of formData.entries()) {
+        data[pair[0]] = pair[1];
+    }
+    
+    jQuery.ajax({
+        url: '<?php echo admin_url("admin-ajax.php"); ?>',
+        type: 'POST',
+        data: data,
+        success: function(response) {
+            if (response.success) {
+                alert('Schema updated successfully!');
+                toggleSchemaEditor(index);
+                syncSchemasWithDOM();
+            } else {
+                alert('Error: ' + (response.data || 'Unknown error'));
+            }
+        },
+        error: function() {
+            alert('Connection error. Please try again.');
+        }
+    });
+}
+
+// Toggle schema on/off status
+function toggleSchemaStatus(index) {
+    jQuery.ajax({
+        url: '<?php echo admin_url("admin-ajax.php"); ?>',
+        type: 'POST',
+        data: {
+            action: 'schemati_toggle_schema',
+            schema_index: index,
+            post_id: currentPostId,
+            nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
+        },
+        success: function(response) {
+            if (response.success) {
+                syncSchemasWithDOM();
+            } else {
+                alert('Error: ' + (response.data || 'Unknown error'));
+            }
+        },
+        error: function() {
+            alert('Connection error. Please try again.');
+        }
+    });
+}
+
+// Delete schema
+function deleteSchema(index) {
+    if (!confirm('Are you sure you want to delete this schema?')) {
+        return;
+    }
+    
+    jQuery.ajax({
+        url: '<?php echo admin_url("admin-ajax.php"); ?>',
+        type: 'POST',
+        data: {
+            action: 'schemati_delete_schema',
+            schema_index: index,
+            post_id: currentPostId,
+            nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
+        },
+        success: function(response) {
+            if (response.success) {
+                alert('Schema deleted successfully!');
+                syncSchemasWithDOM();
+            } else {
+                alert('Error: ' + (response.data || 'Unknown error'));
+            }
+        },
+        error: function() {
+            alert('Connection error. Please try again.');
+        }
+    });
+}
+
+// Toggle global schema setting
+function toggleGlobalSchema() {
+    var checkbox = document.getElementById('schema-enabled');
+    var enabled = checkbox.checked ? 1 : 0;
+    
+    jQuery.ajax({
+        url: '<?php echo admin_url("admin-ajax.php"); ?>',
+        type: 'POST',
+        data: {
+            action: 'schemati_toggle_global',
+            enabled: enabled,
+            nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
+        },
+        success: function(response) {
+            if (response.success) {
+                document.getElementById('schema-status').textContent = enabled ? 'Active' : 'Disabled';
+            } else {
+                alert('Error: ' + (response.data || 'Unknown error'));
+                checkbox.checked = !checkbox.checked; // Revert checkbox
+            }
+        },
+        error: function() {
+            alert('Connection error. Please try again.');
+            checkbox.checked = !checkbox.checked; // Revert checkbox
+        }
+    });
+}
+
+// Define loadSchemaTemplate function
+function loadSchemaTemplate() {
+    loadSchemaTemplateWithFeedback();
+}
             
             // Update counters
             updateSchemaCounts();
@@ -2080,7 +2237,6 @@ class Schemati {
         
         // Export page schemas
         function exportPageSchemas() {
-            refreshSchemas();
             var blob = new Blob([JSON.stringify(detectedSchemas, null, 2)], {type: 'application/json'});
             var url = URL.createObjectURL(blob);
             var a = document.createElement('a');
@@ -2154,7 +2310,6 @@ class Schemati {
         
         // Validate all schemas
         function validateAllSchemas() {
-            refreshSchemas();
             var validCount = 0;
             var invalidCount = 0;
             
@@ -2206,27 +2361,6 @@ class Schemati {
         function toggleAllSchemas() {
             // Implementation for toggling all schemas
             alert('All schemas toggled!');
-        }
-        
-        // Rest of the existing JavaScript functions...
-        // (Include all the previous functions like toggleSchematiSidebar, toggleSchemaEditor, etc.)
-        
-        function toggleSchematiSidebar() {
-            var sidebar = document.getElementById("schemati-sidebar");
-            if (sidebar) {
-                sidebar.style.display = sidebar.style.display === "none" ? "block" : "none";
-                if (sidebar.style.display === "block") {
-                    refreshSchemas();
-                }
-            }
-        }
-        
-        function hideSchematiPreview() {
-            document.getElementById('schemati-schema-modal').style.display = 'none';
-        }
-        
-        function testGoogleRichResults() {
-            window.open('https://search.google.com/test/rich-results?url=' + encodeURIComponent(window.location.href), '_blank');
         }
         
         // Add CSS for hover effects on template buttons

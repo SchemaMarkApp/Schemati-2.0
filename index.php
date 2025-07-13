@@ -156,7 +156,8 @@ private function send_ajax_error($message = '') {
             'save_schema',
             'add_schema',
             'get_schema_template',
-            'toggle_global'
+            'toggle_global',
+            'clear_update_cache'
         );
         
         foreach ($ajax_actions as $action) {
@@ -2269,12 +2270,75 @@ private function display_export_statistics() {
     /**
      * Enqueue sidebar scripts
      */
-    public function enqueue_sidebar_scripts() {
-        if (!current_user_can('edit_posts') || is_admin()) {
-            return;
-        }
-        wp_enqueue_script('jquery');
+    ublic function enqueue_sidebar_scripts() {
+    if (!current_user_can('edit_posts') || is_admin()) {
+        return;
     }
+    
+    wp_enqueue_script('jquery');
+    
+    // Add essential JavaScript functions for admin bar
+    wp_add_inline_script('jquery', '
+        // Essential functions for admin bar (loaded early)
+        function toggleSchematiSidebar() {
+            var sidebar = document.getElementById("schemati-sidebar");
+            if (sidebar) {
+                if (sidebar.style.display === "none" || sidebar.style.display === "") {
+                    sidebar.style.display = "block";
+                    // Sync schemas when opening if SchematiSidebar exists
+                    if (typeof SchematiSidebar !== "undefined" && SchematiSidebar.syncSchemasWithDOM) {
+                        SchematiSidebar.syncSchemasWithDOM();
+                    }
+                } else {
+                    sidebar.style.display = "none";
+                }
+            } else {
+                console.warn("Schemati sidebar not found");
+            }
+        }
+        
+        function showSchematiPreview() {
+            // First ensure sidebar is available
+            var sidebar = document.getElementById("schemati-sidebar");
+            if (!sidebar) {
+                console.warn("Schemati sidebar not found");
+                return;
+            }
+            
+            // Show sidebar first if hidden
+            if (sidebar.style.display === "none" || sidebar.style.display === "") {
+                toggleSchematiSidebar();
+            }
+            
+            // Wait a moment for sidebar to load, then show preview
+            setTimeout(function() {
+                if (typeof SchematiSidebar !== "undefined" && SchematiSidebar.syncSchemasWithDOM) {
+                    SchematiSidebar.syncSchemasWithDOM();
+                }
+                
+                var modal = document.getElementById("schemati-schema-modal");
+                if (modal) {
+                    // Call the full preview function if available
+                    if (window.showSchematiPreviewFull) {
+                        window.showSchematiPreviewFull();
+                    } else {
+                        // Fallback: just show the modal
+                        modal.style.display = "block";
+                        var content = document.getElementById("schema-modal-content");
+                        if (content) {
+                            content.innerHTML = "<div style=\"text-align: center; padding: 40px; color: #666;\"><div style=\"font-size: 48px; margin-bottom: 15px;\">🔄</div><h3>Loading Schema Preview...</h3><p>Please wait while we detect schemas on this page.</p></div>";
+                        }
+                    }
+                } else {
+                    console.warn("Schema preview modal not found");
+                }
+            }, 100);
+        }
+        
+        // Make functions globally available
+        window.toggleSchematiSidebar = toggleSchematiSidebar;
+        window.showSchematiPreview = showSchematiPreview;
+    '); }
     
     // NOTE: I'll continue with the rest of the file in the next section as this is getting long
     // The remaining methods include: add_sidebar_html, output_schema, get_breadcrumb_data, 
@@ -2550,54 +2614,139 @@ if ($footer_schema) {
      * Updates management page
      */
     public function updates_page() {
-        $remote_version = ($this->github_updater) ? $this->github_updater->get_remote_version() : null;
-        $current_version = SCHEMATI_VERSION;
-        $update_available = $remote_version && version_compare($current_version, $remote_version, '<');
+    $remote_version = ($this->github_updater) ? $this->github_updater->get_remote_version() : null;
+    $current_version = SCHEMATI_VERSION;
+    $update_available = $remote_version && version_compare($current_version, $remote_version, '<');
+    
+    ?>
+    <div class="wrap">
+        <h1><?php _e('Schemati - Updates', 'schemati'); ?></h1>
         
-        ?>
-        <div class="wrap">
-            <h1><?php _e('Schemati - Updates', 'schemati'); ?></h1>
-            
-            <div class="card">
-                <h2><?php _e('Version Information', 'schemati'); ?></h2>
-                <table class="form-table">
-                    <tr>
-                        <th scope="row"><?php _e('Current Version', 'schemati'); ?></th>
-                        <td>
-                            <strong><?php echo esc_html($current_version); ?></strong>
-                            <?php if ($update_available): ?>
-                                <span style="color: #d63384; margin-left: 10px;">
-                                    <?php _e('(Update Available)', 'schemati'); ?>
-                                </span>
-                            <?php else: ?>
-                                <span style="color: #198754; margin-left: 10px;">
-                                    <?php _e('(Up to Date)', 'schemati'); ?>
-                                </span>
-                            <?php endif; ?>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php _e('Latest Version', 'schemati'); ?></th>
-                        <td>
-                            <?php if ($remote_version): ?>
-                                <strong><?php echo esc_html($remote_version); ?></strong>
-                            <?php else: ?>
-                                <em><?php _e('Unable to check', 'schemati'); ?></em>
-                            <?php endif; ?>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php _e('Architecture', 'schemati'); ?></th>
-                        <td>
-                            <strong><?php _e('Enhanced Modular System', 'schemati'); ?></strong>
-                            <p class="description"><?php _e('Improved performance with centralized hooks and better organization.', 'schemati'); ?></p>
-                        </td>
-                    </tr>
-                </table>
-            </div>
+        <div class="card">
+            <h2><?php _e('Version Information', 'schemati'); ?></h2>
+            <table class="form-table">
+                <tr>
+                    <th scope="row"><?php _e('Current Version', 'schemati'); ?></th>
+                    <td>
+                        <strong><?php echo esc_html($current_version); ?></strong>
+                        <?php if ($update_available): ?>
+                            <span style="color: #d63384; margin-left: 10px;">
+                                <?php _e('(Update Available)', 'schemati'); ?>
+                            </span>
+                        <?php else: ?>
+                            <span style="color: #198754; margin-left: 10px;">
+                                <?php _e('(Up to Date)', 'schemati'); ?>
+                            </span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><?php _e('Latest Version', 'schemati'); ?></th>
+                    <td>
+                        <?php if ($remote_version): ?>
+                            <strong><?php echo esc_html($remote_version); ?></strong>
+                        <?php else: ?>
+                            <em><?php _e('Unable to check', 'schemati'); ?></em>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><?php _e('Update Source', 'schemati'); ?></th>
+                    <td>
+                        <a href="https://github.com/SchemaMarkApp/schemati-2.0" target="_blank">
+                            GitHub Repository
+                        </a>
+                    </td>
+                </tr>
+            </table>
         </div>
-        <?php
+        
+        <?php if ($update_available): ?>
+        <div class="card">
+            <h2><?php _e('Update Available', 'schemati'); ?></h2>
+            <p><?php printf(__('A new version (%s) is available for download.', 'schemati'), $remote_version); ?></p>
+            
+            <?php
+            $plugin_slug = plugin_basename(SCHEMATI_FILE);
+            $update_url = wp_nonce_url(
+                self_admin_url('update.php?action=upgrade-plugin&plugin=' . urlencode($plugin_slug)),
+                'upgrade-plugin_' . $plugin_slug
+            );
+            ?>
+            
+            <p>
+                <a href="<?php echo esc_url($update_url); ?>" class="button button-primary">
+                    <?php _e('Update Now', 'schemati'); ?>
+                </a>
+                <a href="https://github.com/SchemaMarkApp/schemati-2.0/releases/latest" target="_blank" class="button button-secondary">
+                    <?php _e('View Release Notes', 'schemati'); ?>
+                </a>
+            </p>
+        </div>
+        <?php endif; ?>
+        
+        <div class="card">
+            <h2><?php _e('Manual Update Check', 'schemati'); ?></h2>
+            <p><?php _e('Click the button below to manually check for updates from GitHub.', 'schemati'); ?></p>
+            
+            <p>
+                <button type="button" onclick="checkForUpdates()" class="button button-secondary">
+                    <?php _e('Check for Updates', 'schemati'); ?>
+                </button>
+            </p>
+        </div>
+        
+        <div class="card">
+            <h2><?php _e('Auto-Update Settings', 'schemati'); ?></h2>
+            <p><?php _e('Schemati checks for updates automatically:', 'schemati'); ?></p>
+            <ul>
+                <li><?php _e('Every 12 hours when accessing WordPress admin', 'schemati'); ?></li>
+                <li><?php _e('When visiting the Updates page', 'schemati'); ?></li>
+                <li><?php _e('When manually checking via the button above', 'schemati'); ?></li>
+            </ul>
+        </div>
+    </div>
+    
+    <script>
+    function checkForUpdates() {
+        var button = event.target;
+        button.textContent = 'Checking...';
+        button.disabled = true;
+        
+        // Clear cached data and reload page
+        fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'action=schemati_clear_update_cache&nonce=<?php echo wp_create_nonce('schemati_clear_cache'); ?>'
+        }).then(function() {
+            location.reload();
+        }).catch(function() {
+            button.textContent = 'Check for Updates';
+            button.disabled = false;
+            alert('Update check failed. Please try again.');
+        });
     }
+    </script>
+    <?php
+}
+
+public function ajax_clear_update_cache() {
+    check_ajax_referer('schemati_clear_cache', 'nonce');
+    
+    if (!current_user_can('update_plugins')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    // Clear update caches
+    delete_transient('schemati_remote_version');
+    delete_transient('schemati_changelog');
+    delete_site_transient('update_plugins');
+    
+    wp_send_json_success('Cache cleared');
+}
+
 
     /**
      * Enhanced sidebar HTML with improved functionality
@@ -2801,10 +2950,6 @@ var SchematiSidebar = {
     nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>',
     detectedSchemas: [],
     phpSchemas: <?php echo json_encode($current_schemas); ?>,
-    if (typeof SchematiSidebar !== 'undefined') {
-    SchematiSidebar.testCurrentPage = function() {
-        testSchemaMarkupNet();
-    };
     // Centralized AJAX call handler
     ajaxCall: function(action, data, successCallback, errorCallback) {
         data.action = action;
@@ -2900,7 +3045,9 @@ var SchematiSidebar = {
         if (currentCountEl) currentCountEl.textContent = count + ' schemas';
     }
 };
-
+SchematiSidebar.testCurrentPage = function() {
+    testSchemaMarkupNet();
+};
 // Enhanced sidebar functions using the new architecture
 function toggleSchematiSidebar() {
     var sidebar = document.getElementById("schemati-sidebar");

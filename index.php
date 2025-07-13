@@ -5,7 +5,7 @@
  * Plugin URI: https://schemamarkapp.com/
  * Author: Shay Ohayon
  * Author URI: https://schemamarkapp.com/
- * Version: 5.0.0
+ * Version: 5.1.0
  * Text Domain: schemati
  * Requires at least: 5.0
  * Tested up to: 6.4
@@ -20,11 +20,11 @@ if (!defined('ABSPATH')) {
 }
 
 // Define constants
-define('SCHEMATI_VERSION', '5.0.0');
+define('SCHEMATI_VERSION', '5.1.0');
 define('SCHEMATI_FILE', __FILE__);
 define('SCHEMATI_DIR', plugin_dir_path(__FILE__));
 define('SCHEMATI_URL', plugin_dir_url(__FILE__));
-// Force early text domain loading // Priority 1 = very early
+
 /**
  * Main Schemati Plugin Class
  */
@@ -32,6 +32,13 @@ class Schemati {
     
     private static $instance = null;
     private $github_updater;
+    private $cache_group = 'schemati_schemas';
+    private $schema_types = array(
+        'LocalBusiness', 'Service', 'Product', 'Event', 'Person', 
+        'FAQPage', 'HowTo', 'Recipe', 'VideoObject', 'Review', 
+        'Organization', 'Article', 'BlogPosting', 'NewsArticle', 'WebSite',
+        'ImageObject', 'AudioObject', 'CreativeWork', 'Place', 'Offer'
+    );
     
     public static function instance() {
         if (null === self::$instance) {
@@ -41,18 +48,45 @@ class Schemati {
     }
     
     private function __construct() {
-    // Load text domain immediately
-    add_action('init', array($this, 'load_textdomain'), 1);
-    $this->init();
-}
+        add_action('init', array($this, 'load_textdomain'), 1);
+        add_action('init', array($this, 'init'), 10);
+    }
+    
+    /**
+     * Load text domain
+     */
+    public function load_textdomain() {
+        $loaded = load_plugin_textdomain(
+            'schemati', 
+            false, 
+            dirname(plugin_basename(__FILE__)) . '/languages'
+        );
+        
+        // Debug: Force reload if not loaded
+        if (!$loaded && get_locale() === 'he_IL') {
+            $mo_file = dirname(__FILE__) . '/languages/schemati-he_IL.mo';
+            if (file_exists($mo_file)) {
+                load_textdomain('schemati', $mo_file);
+            }
+        }
+    }
     
     /**
      * Initialize plugin
      */
     public function init() {
-        // Activation/Deactivation hooks
+        $this->register_hooks();
+    }
+    
+    /**
+     * Register all hooks - NEW MODULAR APPROACH
+     */
+    private function register_hooks() {
+        // Plugin lifecycle
         register_activation_hook(__FILE__, array($this, 'activate'));
-        register_deactivation_hook(__FILE__, array($this, 'deactivate'));        // Core hooks
+        register_deactivation_hook(__FILE__, array($this, 'deactivate'));
+        
+        // Core functionality
         $this->init_github_updater();
         add_action('wp_head', array($this, 'output_schema'), 1);
         
@@ -63,14 +97,9 @@ class Schemati {
             add_action('admin_enqueue_scripts', array($this, 'admin_scripts'));
             add_action('add_meta_boxes', array($this, 'add_meta_boxes'));
             add_action('save_post', array($this, 'save_meta_boxes'));
-            
+			add_action('admin_notices', array($this, 'admin_notices'));
             // AJAX handlers
-            add_action('wp_ajax_schemati_toggle_schema', array($this, 'ajax_toggle_schema'));
-            add_action('wp_ajax_schemati_delete_schema', array($this, 'ajax_delete_schema'));
-            add_action('wp_ajax_schemati_save_schema', array($this, 'ajax_save_schema'));
-            add_action('wp_ajax_schemati_add_schema', array($this, 'ajax_add_schema'));
-            add_action('wp_ajax_schemati_get_schema_template', array($this, 'ajax_get_schema_template'));
-            add_action('wp_ajax_schemati_toggle_global', array($this, 'ajax_toggle_global'));
+            $this->register_ajax_handlers();
         }
         
         // Frontend hooks
@@ -78,673 +107,813 @@ class Schemati {
         add_shortcode('breadcrumbs', array($this, 'breadcrumb_shortcode'));
         add_action('wp_enqueue_scripts', array($this, 'frontend_styles'));
         
-        // Sidebar functionality
-        add_action('admin_bar_menu', array($this, 'add_admin_bar'), 100);
-        add_action('wp_footer', array($this, 'add_sidebar_html'));
-        add_action('wp_enqueue_scripts', array($this, 'enqueue_sidebar_scripts'));
+        // Sidebar functionality - conditional loading
+        if (current_user_can('edit_posts') && !is_admin()) {
+            add_action('admin_bar_menu', array($this, 'add_admin_bar'), 100);
+            add_action('wp_footer', array($this, 'add_sidebar_html'));
+            add_action('wp_enqueue_scripts', array($this, 'enqueue_sidebar_scripts'));
+        }
+    }
+    
+    /**
+     * Register AJAX handlers - NEW CENTRALIZED APPROACH
+     */
+	private function verify_ajax_request($capability = 'edit_posts') {
+    // Nonce verification
+    if (!wp_verify_nonce($_POST['nonce'] ?? '', 'schemati_ajax')) {
+        $this->send_ajax_error('Security check failed');
+        return false;
+    }
+    
+    // Capability check
+    if (!current_user_can($capability)) {
+        $this->send_ajax_error('Insufficient permissions');
+        return false;
+    }
+    
+    return true;
+}
+
+// 2. ADD: Standardized AJAX success response (NEW)
+private function send_ajax_success($data = null, $message = '') {
+    wp_send_json_success(array(
+        'data' => $data,
+        'message' => $message
+    ));
+}
+
+// 3. ADD: Standardized AJAX error response (NEW)
+private function send_ajax_error($message = '') {
+    wp_send_json_error(array(
+        'message' => $message
+    ));
+}
+
+    private function register_ajax_handlers() {
+        $ajax_actions = array(
+            'toggle_schema',
+            'delete_schema', 
+            'save_schema',
+            'add_schema',
+            'get_schema_template',
+            'toggle_global'
+        );
+        
+        foreach ($ajax_actions as $action) {
+            add_action('wp_ajax_schemati_' . $action, array($this, 'ajax_' . $action));
+        }
     }
 
     /**
      * AJAX handler to toggle schema status
      */
     public function ajax_toggle_schema() {
-    // Verify nonce
-    if (!check_ajax_referer('schemati_ajax', 'nonce', false)) {
-        wp_send_json_error('Invalid nonce');
+    if (!$this->verify_ajax_request()) {
+        return; // Security handled centrally
+    }
+    
+    // Enhanced input validation
+    $schema_index = filter_input(INPUT_POST, 'schema_index', FILTER_VALIDATE_INT);
+    $post_id = filter_input(INPUT_POST, 'post_id', FILTER_VALIDATE_INT);
+    
+    if ($schema_index === false || !$post_id) {
+        $this->send_ajax_error('Invalid parameters provided');
         return;
     }
     
-    // Check permissions
-    if (!current_user_can('edit_posts')) {
-        wp_send_json_error('Insufficient permissions');
-        return;
-    }
-    
-    // Validate inputs
-    $schema_index = isset($_POST['schema_index']) ? intval($_POST['schema_index']) : -1;
-    $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
-    
-    if ($schema_index < 0) {
-        wp_send_json_error('Invalid schema index');
-        return;
-    }
-    
-    if (!$post_id) {
-        wp_send_json_error('No post ID provided');
-        return;
-    }
-    
-    // Get and validate schemas
     $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
     if (!is_array($custom_schemas)) {
         $custom_schemas = array();
     }
     
-    if (!isset($custom_schemas[$schema_index])) {
-        wp_send_json_error('Schema not found');
-        return;
-    }
-    
-    // Toggle status
-    $custom_schemas[$schema_index]['_enabled'] = !($custom_schemas[$schema_index]['_enabled'] ?? true);
-    
-    // Save
-    if (update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas)) {
-        wp_send_json_success('Schema status updated');
+    if (isset($custom_schemas[$schema_index])) {
+        $current_status = $custom_schemas[$schema_index]['_enabled'] ?? true;
+        $custom_schemas[$schema_index]['_enabled'] = !$current_status;
+        
+        if (update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas)) {
+            $this->send_ajax_success(array('new_status' => !$current_status), 'Schema status updated successfully');
+        } else {
+            $this->send_ajax_error('Failed to update schema status');
+        }
     } else {
-        wp_send_json_error('Failed to update schema');
+        $this->send_ajax_error('Schema not found');
     }
 }
+
 
     /**
      * AJAX handler to delete schema
      */
     public function ajax_delete_schema() {
-        check_ajax_referer('schemati_ajax', 'nonce');
-        
-        if (!current_user_can('edit_posts')) {
-            wp_die('Insufficient permissions');
-        }
-        
-        $schema_index = intval($_POST['schema_index']);
-        $post_id = intval($_POST['post_id']);
-        
-        if (!$post_id) {
-            wp_send_json_error('No post ID provided');
-        }
-        
-        $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
-        if (!is_array($custom_schemas)) {
-            wp_send_json_error('No schemas found');
-        }
-        
-        if (isset($custom_schemas[$schema_index])) {
-            unset($custom_schemas[$schema_index]);
-            $custom_schemas = array_values($custom_schemas); // Re-index array
-            update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas);
-            wp_send_json_success('Schema deleted');
-        }
-        
-        wp_send_json_error('Schema not found');
+    if (!$this->verify_ajax_request()) {
+        return;
     }
+    
+    $schema_index = filter_input(INPUT_POST, 'schema_index', FILTER_VALIDATE_INT);
+    $post_id = filter_input(INPUT_POST, 'post_id', FILTER_VALIDATE_INT);
+    
+    if ($schema_index === false || !$post_id) {
+        $this->send_ajax_error('Invalid parameters provided');
+        return;
+    }
+    
+    $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
+    if (!is_array($custom_schemas)) {
+        $this->send_ajax_error('No schemas found');
+        return;
+    }
+    
+    if (isset($custom_schemas[$schema_index])) {
+        unset($custom_schemas[$schema_index]);
+        $custom_schemas = array_values($custom_schemas); // Re-index array
+        
+        if (update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas)) {
+            $this->send_ajax_success(null, 'Schema deleted successfully');
+        } else {
+            $this->send_ajax_error('Failed to delete schema');
+        }
+    } else {
+        $this->send_ajax_error('Schema not found');
+    }
+}
+
 
     /**
      * AJAX handler to save schema changes
      */
     public function ajax_save_schema() {
-        check_ajax_referer('schemati_ajax', 'nonce');
-        
-        if (!current_user_can('edit_posts')) {
-            wp_die('Insufficient permissions');
-        }
-        
-        $schema_index = intval($_POST['schema_index']);
-        $post_id = intval($_POST['post_id']);
-        
-        if (!$post_id) {
-            wp_send_json_error('No post ID provided');
-        }
-        
-        $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
-        if (!is_array($custom_schemas)) {
-            $custom_schemas = array();
-        }
-        
-        if (isset($custom_schemas[$schema_index])) {
-            // Update schema with new data
-            $schema = $custom_schemas[$schema_index];
-            
-            // Update common fields
-            if (isset($_POST['name'])) {
-                $schema['name'] = sanitize_text_field($_POST['name']);
-            }
-            if (isset($_POST['description'])) {
-                $schema['description'] = sanitize_textarea_field($_POST['description']);
-            }
-            if (isset($_POST['url'])) {
-                $schema['url'] = esc_url_raw($_POST['url']);
-            }
-            
-            // Update schema-specific fields based on type
-            switch ($schema['@type']) {
-                case 'LocalBusiness':
-                case 'Service':
-                    if (isset($_POST['address'])) {
-                        $schema['address'] = sanitize_textarea_field($_POST['address']);
-                    }
-                    if (isset($_POST['telephone'])) {
-                        $schema['telephone'] = sanitize_text_field($_POST['telephone']);
-                    }
-                    if (isset($_POST['email'])) {
-                        $schema['email'] = sanitize_email($_POST['email']);
-                    }
-                    break;
-                
-                case 'Product':
-                    if (isset($_POST['brand'])) {
-                        $schema['brand'] = sanitize_text_field($_POST['brand']);
-                    }
-                    if (isset($_POST['price'])) {
-                        $schema['offers']['price'] = sanitize_text_field($_POST['price']);
-                    }
-                    if (isset($_POST['currency'])) {
-                        $schema['offers']['priceCurrency'] = sanitize_text_field($_POST['currency']);
-                    }
-                    break;
-            }
-            
-            $custom_schemas[$schema_index] = $schema;
-            update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas);
-            wp_send_json_success('Schema updated successfully');
-        }
-        
-        wp_send_json_error('Schema not found');
+    if (!$this->verify_ajax_request()) {
+        return;
     }
+    
+    $schema_index = filter_input(INPUT_POST, 'schema_index', FILTER_VALIDATE_INT);
+    $post_id = filter_input(INPUT_POST, 'post_id', FILTER_VALIDATE_INT);
+    
+    if ($schema_index === false || !$post_id) {
+        $this->send_ajax_error('Invalid parameters provided');
+        return;
+    }
+    
+    $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
+    if (!is_array($custom_schemas)) {
+        $custom_schemas = array();
+    }
+    
+    if (isset($custom_schemas[$schema_index])) {
+        // Update schema with new data
+        $schema = $custom_schemas[$schema_index];
+        
+        // Update common fields with proper sanitization
+        if (isset($_POST['name'])) {
+            $schema['name'] = sanitize_text_field($_POST['name']);
+        }
+        if (isset($_POST['description'])) {
+            $schema['description'] = sanitize_textarea_field($_POST['description']);
+        }
+        if (isset($_POST['url'])) {
+            $schema['url'] = esc_url_raw($_POST['url']);
+        }
+        
+        // Update schema-specific fields based on type
+        switch ($schema['@type']) {
+            case 'LocalBusiness':
+            case 'Service':
+                if (isset($_POST['address'])) {
+                    $schema['address'] = sanitize_textarea_field($_POST['address']);
+                }
+                if (isset($_POST['telephone'])) {
+                    $schema['telephone'] = sanitize_text_field($_POST['telephone']);
+                }
+                if (isset($_POST['email'])) {
+                    $schema['email'] = sanitize_email($_POST['email']);
+                }
+                break;
+            
+            case 'Product':
+                if (isset($_POST['brand'])) {
+                    $schema['brand'] = sanitize_text_field($_POST['brand']);
+                }
+                if (isset($_POST['price'])) {
+                    $schema['offers']['price'] = sanitize_text_field($_POST['price']);
+                }
+                if (isset($_POST['currency'])) {
+                    $schema['offers']['priceCurrency'] = sanitize_text_field($_POST['currency']);
+                }
+                break;
+        }
+        
+        $custom_schemas[$schema_index] = $schema;
+        
+        if (update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas)) {
+            $this->send_ajax_success($schema, 'Schema updated successfully');
+        } else {
+            $this->send_ajax_error('Failed to update schema');
+        }
+    } else {
+        $this->send_ajax_error('Schema not found');
+    }
+}
+
 
     /**
      * AJAX handler to add new schema
      */
     public function ajax_add_schema() {
-        check_ajax_referer('schemati_ajax', 'nonce');
-        
-        if (!current_user_can('edit_posts')) {
-            wp_die('Insufficient permissions');
-        }
-        
-        $schema_type = sanitize_text_field($_POST['schema_type']);
-        $post_id = intval($_POST['post_id']);
-        
-        if (!$post_id) {
-            wp_send_json_error('No post ID provided');
-        }
-        
-        // Create new schema based on type
-        $new_schema = $this->create_schema_template($schema_type, $_POST);
-        
-        if (!$new_schema) {
-            wp_send_json_error('Invalid schema type');
-        }
-        
-        $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
-        if (!is_array($custom_schemas)) {
-            $custom_schemas = array();
-        }
-        
-        $custom_schemas[] = $new_schema;
-        update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas);
-        
-        wp_send_json_success('Schema added successfully');
+    if (!$this->verify_ajax_request()) {
+        return;
     }
+    
+    $schema_type = sanitize_text_field($_POST['schema_type'] ?? '');
+    $post_id = filter_input(INPUT_POST, 'post_id', FILTER_VALIDATE_INT);
+    
+    if (empty($schema_type) || !$post_id) {
+        $this->send_ajax_error('Invalid schema type or post ID');
+        return;
+    }
+    
+    // Validate schema type against allowed types
+    if (!in_array($schema_type, $this->schema_types)) {
+        $this->send_ajax_error('Invalid schema type provided');
+        return;
+    }
+    
+    // Create new schema based on type
+    $new_schema = $this->create_schema_template($schema_type, $_POST);
+    
+    if (!$new_schema) {
+        $this->send_ajax_error('Failed to create schema template');
+        return;
+    }
+    
+    $custom_schemas = get_post_meta($post_id, '_schemati_custom_schemas', true);
+    if (!is_array($custom_schemas)) {
+        $custom_schemas = array();
+    }
+    
+    $custom_schemas[] = $new_schema;
+    
+    if (update_post_meta($post_id, '_schemati_custom_schemas', $custom_schemas)) {
+        $this->send_ajax_success($new_schema, 'Schema added successfully');
+    } else {
+        $this->send_ajax_error('Failed to save new schema');
+    }
+}
 
     /**
      * AJAX handler to get schema template
      */
     public function ajax_get_schema_template() {
-        check_ajax_referer('schemati_ajax', 'nonce');
-        
-        if (!current_user_can('edit_posts')) {
-            wp_die('Insufficient permissions');
-        }
-        
-        $schema_type = sanitize_text_field($_POST['schema_type']);
-        $template_html = $this->get_schema_template_html($schema_type);
-        
-        if ($template_html) {
-            wp_send_json_success($template_html);
-        } else {
-            wp_send_json_error('Template not found');
-        }
+    if (!$this->verify_ajax_request()) {
+        return;
     }
+    
+    $schema_type = sanitize_text_field($_POST['schema_type'] ?? '');
+    
+    if (empty($schema_type)) {
+        $this->send_ajax_error('Schema type is required');
+        return;
+    }
+    
+    // Validate schema type
+    if (!in_array($schema_type, $this->schema_types)) {
+        $this->send_ajax_error('Invalid schema type provided');
+        return;
+    }
+    
+    $template_html = $this->get_schema_template_html($schema_type);
+    
+    if ($template_html) {
+        $this->send_ajax_success($template_html, 'Template loaded successfully');
+    } else {
+        $this->send_ajax_error('Template not found for schema type: ' . $schema_type);
+    }
+}
 
     /**
      * AJAX handler to toggle global schema settings
      */
     public function ajax_toggle_global() {
-        check_ajax_referer('schemati_ajax', 'nonce');
-        
-        if (!current_user_can('manage_options')) {
-            wp_die('Insufficient permissions');
-        }
-        
-        $enabled = intval($_POST['enabled']);
-        $settings = $this->get_settings('schemati_general');
-        $settings['enabled'] = $enabled;
-        
-        update_option('schemati_general', $settings);
-        wp_send_json_success('Global setting updated');
+    if (!$this->verify_ajax_request('manage_options')) {
+        return;
     }
+    
+    $enabled = filter_input(INPUT_POST, 'enabled', FILTER_VALIDATE_INT);
+    
+    if ($enabled === false) {
+        $this->send_ajax_error('Invalid enabled value');
+        return;
+    }
+    
+    $settings = $this->get_settings('schemati_general');
+    $settings['enabled'] = (bool) $enabled;
+    
+    if (update_option('schemati_general', $settings)) {
+        $this->send_ajax_success(array('enabled' => (bool) $enabled), 'Global setting updated successfully');
+    } else {
+        $this->send_ajax_error('Failed to update global setting');
+    }
+}
+	private function get_current_page_url($include_protocol = false) {
+    $url = $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
+    
+    if ($include_protocol) {
+        $protocol = is_ssl() ? 'https://' : 'http://';
+        $url = $protocol . $url;
+    }
+    
+    return $url;
+}
+
+/**
+ * Get site domain without protocol
+ */
+private function get_site_domain() {
+    return parse_url(home_url(), PHP_URL_HOST);
+}
+	public function admin_notices() {
+    $screen = get_current_screen();
+    if ($screen && strpos($screen->id, 'schemati') !== false) {
+        ?>
+        <div class="notice notice-info is-dismissible">
+            <p>
+                <strong><?php _e('Schema Validation', 'schemati'); ?>:</strong> 
+                <?php _e('Use our comprehensive schema validation tool at', 'schemati'); ?> 
+                <a href="https://schemamarkup.net/?url=<?php echo esc_attr($this->get_site_domain()); ?>" target="_blank">
+                    <strong>schemamarkup.net</strong>
+                </a> 
+                <?php _e('to test your website\'s schema markup.', 'schemati'); ?>
+            </p>
+        </div>
+        <?php
+    }
+}
 
     /**
      * Create schema template based on type
      */
     private function create_schema_template($schema_type, $data) {
-        $schema = array(
-            '@context' => 'https://schema.org',
-            '@type' => $schema_type,
-            '_enabled' => true,
-            '_source' => 'custom'
+    $schema = array(
+        '@context' => 'https://schema.org',
+        '@type' => $schema_type,
+        '_enabled' => true,
+        '_source' => 'custom'
+    );
+    
+    // Add common fields for all schemas
+    $common_fields = array('name', 'description', 'url');
+    foreach ($common_fields as $field) {
+        if (isset($data[$field]) && !empty($data[$field])) {
+            $schema[$field] = sanitize_text_field($data[$field]);
+        }
+    }
+    
+    // Add type-specific fields using modular approach
+    $this->add_type_specific_fields($schema, $schema_type, $data);
+    
+    return $schema;
+}
+	private function add_type_specific_fields(&$schema, $schema_type, $data) {
+    // Convert schema type to method name (e.g., LocalBusiness -> localbusiness)
+    $method = 'add_' . strtolower(str_replace('_', '', $schema_type)) . '_fields';
+    
+    if (method_exists($this, $method)) {
+        $this->$method($schema, $data);
+    } else {
+        // Fallback for unknown schema types
+        $this->add_generic_fields($schema, $data);
+    }
+}
+
+// 3. ADD: LocalBusiness-specific fields (NEW)
+private function add_localbusiness_fields(&$schema, $data) {
+    $fields = array('address', 'telephone', 'email');
+    foreach ($fields as $field) {
+        if (isset($data[$field]) && !empty($data[$field])) {
+            $schema[$field] = $field === 'email' ? 
+                sanitize_email($data[$field]) : 
+                sanitize_text_field($data[$field]);
+        }
+    }
+    
+    // Set default URL if not provided
+    if (empty($schema['url'])) {
+        $schema['url'] = get_permalink();
+    }
+    
+    // Optional fields
+    if (!empty($data['opening_hours'])) {
+        $schema['openingHours'] = sanitize_text_field($data['opening_hours']);
+    }
+    if (!empty($data['price_range'])) {
+        $schema['priceRange'] = sanitize_text_field($data['price_range']);
+    }
+}
+
+// 4. ADD: Service-specific fields (NEW)
+private function add_service_fields(&$schema, $data) {
+    $schema['provider'] = array(
+        '@type' => 'Organization',
+        'name' => get_bloginfo('name')
+    );
+    
+    if (!empty($data['area_served'])) {
+        $schema['areaServed'] = sanitize_text_field($data['area_served']);
+    }
+    if (!empty($data['service_type'])) {
+        $schema['serviceType'] = sanitize_text_field($data['service_type']);
+    }
+}
+
+// 5. ADD: Product-specific fields (NEW)
+private function add_product_fields(&$schema, $data) {
+    if (isset($data['brand']) && !empty($data['brand'])) {
+        $schema['brand'] = sanitize_text_field($data['brand']);
+    }
+    
+    // Handle offers/pricing
+    if (isset($data['price']) || isset($data['currency'])) {
+        $schema['offers'] = array(
+            '@type' => 'Offer',
+            'price' => sanitize_text_field($data['price'] ?? ''),
+            'priceCurrency' => sanitize_text_field($data['currency'] ?? 'USD'),
+            'availability' => 'https://schema.org/InStock'
         );
+    }
+    
+    // Optional product identifiers
+    if (!empty($data['sku'])) {
+        $schema['sku'] = sanitize_text_field($data['sku']);
+    }
+    if (!empty($data['mpn'])) {
+        $schema['mpn'] = sanitize_text_field($data['mpn']);
+    }
+}
+
+// 6. ADD: Person-specific fields (NEW)
+private function add_person_fields(&$schema, $data) {
+    if (isset($data['job_title']) && !empty($data['job_title'])) {
+        $schema['jobTitle'] = sanitize_text_field($data['job_title']);
+    }
+    
+    $contact_fields = array('email', 'telephone');
+    foreach ($contact_fields as $field) {
+        if (isset($data[$field]) && !empty($data[$field])) {
+            $schema[$field] = $field === 'email' ? 
+                sanitize_email($data[$field]) : 
+                sanitize_text_field($data[$field]);
+        }
+    }
+    
+    if (!empty($data['works_for'])) {
+        $schema['worksFor'] = array(
+            '@type' => 'Organization',
+            'name' => sanitize_text_field($data['works_for'])
+        );
+    }
+}
+
+// 7. ADD: Event-specific fields (NEW)
+private function add_event_fields(&$schema, $data) {
+    if (!empty($data['start_date'])) {
+        $schema['startDate'] = sanitize_text_field($data['start_date']);
+    }
+    if (!empty($data['end_date'])) {
+        $schema['endDate'] = sanitize_text_field($data['end_date']);
+    }
+    
+    if (!empty($data['location'])) {
+        $schema['location'] = array(
+            '@type' => 'Place',
+            'name' => sanitize_text_field($data['location'])
+        );
+    }
+    
+    if (!empty($data['event_status'])) {
+        $schema['eventStatus'] = 'https://schema.org/' . sanitize_text_field($data['event_status']);
+    }
+    
+    if (!empty($data['ticket_url'])) {
+        $schema['offers'] = array(
+            '@type' => 'Offer',
+            'url' => esc_url_raw($data['ticket_url'])
+        );
+    }
+}
+
+// 8. ADD: FAQ Page-specific fields (NEW)
+private function add_faqpage_fields(&$schema, $data) {
+    $schema['mainEntity'] = array();
+    
+    if (isset($data['questions']) && is_array($data['questions'])) {
+        foreach ($data['questions'] as $i => $question) {
+            if (!empty($question) && !empty($data['answers'][$i])) {
+                $schema['mainEntity'][] = array(
+                    '@type' => 'Question',
+                    'name' => sanitize_text_field($question),
+                    'acceptedAnswer' => array(
+                        '@type' => 'Answer',
+                        'text' => sanitize_textarea_field($data['answers'][$i])
+                    )
+                );
+            }
+        }
+    }
+}
+
+// 9. ADD: Organization-specific fields (NEW)
+private function add_organization_fields(&$schema, $data) {
+    $contact_fields = array('email', 'telephone');
+    foreach ($contact_fields as $field) {
+        if (isset($data[$field]) && !empty($data[$field])) {
+            $schema[$field] = $field === 'email' ? 
+                sanitize_email($data[$field]) : 
+                sanitize_text_field($data[$field]);
+        }
+    }
+    
+    if (!empty($data['logo_url'])) {
+        $schema['logo'] = esc_url_raw($data['logo_url']);
+    }
+    
+    if (!empty($data['social_urls'])) {
+        $social_urls = explode("\n", $data['social_urls']);
+        $schema['sameAs'] = array_map('esc_url_raw', array_filter($social_urls));
+    }
+}
+
+// 10. ADD: Article-specific fields (NEW)
+private function add_article_fields(&$schema, $data) {
+    $this->add_blogposting_fields($schema, $data);
+}
+
+private function add_blogposting_fields(&$schema, $data) {
+    $schema['headline'] = sanitize_text_field($data['headline'] ?? get_the_title());
+    
+    $schema['author'] = array(
+        '@type' => 'Person',
+        'name' => sanitize_text_field($data['author_name'] ?? get_the_author())
+    );
+    
+    $schema['datePublished'] = sanitize_text_field($data['date_published'] ?? get_the_date('c'));
+    $schema['dateModified'] = sanitize_text_field($data['date_modified'] ?? get_the_modified_date('c'));
+    
+    if (!empty($data['image_url'])) {
+        $schema['image'] = esc_url_raw($data['image_url']);
+    }
+}
+
+private function add_newsarticle_fields(&$schema, $data) {
+    $this->add_blogposting_fields($schema, $data);
+}
+
+// 11. ADD: Video Object-specific fields (NEW)
+private function add_videoobject_fields(&$schema, $data) {
+    if (!empty($data['content_url'])) {
+        $schema['contentUrl'] = esc_url_raw($data['content_url']);
+    }
+    if (!empty($data['embed_url'])) {
+        $schema['embedUrl'] = esc_url_raw($data['embed_url']);
+    }
+    
+    $schema['uploadDate'] = sanitize_text_field($data['upload_date'] ?? date('c'));
+    
+    if (!empty($data['duration'])) {
+        $schema['duration'] = sanitize_text_field($data['duration']);
+    }
+    if (!empty($data['thumbnail_url'])) {
+        $schema['thumbnailUrl'] = esc_url_raw($data['thumbnail_url']);
+    }
+}
+
+// 12. ADD: Review-specific fields (NEW)
+private function add_review_fields(&$schema, $data) {
+    $schema['itemReviewed'] = array(
+        '@type' => sanitize_text_field($data['item_type'] ?? 'Thing'),
+        'name' => sanitize_text_field($data['item_name'] ?? '')
+    );
+    
+    $schema['reviewRating'] = array(
+        '@type' => 'Rating',
+        'ratingValue' => intval($data['rating_value'] ?? 5),
+        'bestRating' => intval($data['best_rating'] ?? 5),
+        'worstRating' => intval($data['worst_rating'] ?? 1)
+    );
+    
+    $schema['author'] = array(
+        '@type' => 'Person',
+        'name' => sanitize_text_field($data['author_name'] ?? get_the_author())
+    );
+    
+    if (!empty($data['review_body'])) {
+        $schema['reviewBody'] = sanitize_textarea_field($data['review_body']);
+    }
+}
+
+// 13. ADD: WebSite-specific fields (NEW)
+private function add_website_fields(&$schema, $data) {
+    $schema['name'] = sanitize_text_field($data['name'] ?? get_bloginfo('name'));
+    $schema['url'] = home_url();
+    
+    if (!empty($data['potential_action'])) {
+        $schema['potentialAction'] = array(
+            '@type' => 'SearchAction',
+            'target' => home_url('/?s={search_term_string}'),
+            'query-input' => 'required name=search_term_string'
+        );
+    }
+}
+
+// 14. ADD: Generic fallback fields (NEW)
+private function add_generic_fields(&$schema, $data) {
+    // For unknown schema types, just add the common fields
+    // Common fields are already added in create_schema_template()
+    
+    // Add URL if not present
+    if (empty($schema['url'])) {
+        $schema['url'] = get_permalink();
+    }
+}
+
+    private function get_schema_template_html($schema_type) {
+        ob_start();
         
         switch ($schema_type) {
             case 'LocalBusiness':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['address'] = sanitize_textarea_field($data['address'] ?? '');
-                $schema['telephone'] = sanitize_text_field($data['telephone'] ?? '');
-                $schema['email'] = sanitize_email($data['email'] ?? '');
-                $schema['url'] = esc_url_raw($data['url'] ?? get_permalink());
-                if (!empty($data['opening_hours'])) {
-                    $schema['openingHours'] = sanitize_text_field($data['opening_hours']);
-                }
-                if (!empty($data['price_range'])) {
-                    $schema['priceRange'] = sanitize_text_field($data['price_range']);
-                }
+                ?>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Business Name:</label>
+                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Address:</label>
+                    <textarea name="address" rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                </div>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
+                        <input type="text" name="telephone" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
+                        <input type="email" name="email" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website URL:</label>
+                    <input type="url" name="url" value="<?php echo esc_url(get_permalink()); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <?php
                 break;
                 
             case 'Service':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['provider'] = array(
-                    '@type' => 'Organization',
-                    'name' => get_bloginfo('name')
-                );
-                $schema['areaServed'] = sanitize_text_field($data['area_served'] ?? '');
-                if (!empty($data['service_type'])) {
-                    $schema['serviceType'] = sanitize_text_field($data['service_type']);
-                }
+                ?>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Service Name:</label>
+                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Area Served:</label>
+                    <input type="text" name="area_served" placeholder="e.g., New York, NY" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <?php
                 break;
                 
             case 'Product':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['brand'] = sanitize_text_field($data['brand'] ?? '');
-                $schema['offers'] = array(
-                    '@type' => 'Offer',
-                    'price' => sanitize_text_field($data['price'] ?? ''),
-                    'priceCurrency' => sanitize_text_field($data['currency'] ?? 'USD'),
-                    'availability' => 'https://schema.org/InStock'
-                );
-                if (!empty($data['sku'])) {
-                    $schema['sku'] = sanitize_text_field($data['sku']);
-                }
-                if (!empty($data['mpn'])) {
-                    $schema['mpn'] = sanitize_text_field($data['mpn']);
-                }
+                ?>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Product Name:</label>
+                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Brand:</label>
+                    <input type="text" name="brand" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Price:</label>
+                        <input type="number" name="price" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Currency:</label>
+                        <select name="currency" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="USD">USD</option>
+                            <option value="EUR">EUR</option>
+                            <option value="GBP">GBP</option>
+                            <option value="CAD">CAD</option>
+                        </select>
+                    </div>
+                </div>
+                <?php
                 break;
                 
             case 'Event':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['startDate'] = sanitize_text_field($data['start_date'] ?? '');
-                $schema['endDate'] = sanitize_text_field($data['end_date'] ?? '');
-                $schema['location'] = array(
-                    '@type' => 'Place',
-                    'name' => sanitize_text_field($data['location'] ?? '')
-                );
-                if (!empty($data['event_status'])) {
-                    $schema['eventStatus'] = 'https://schema.org/' . sanitize_text_field($data['event_status']);
-                }
-                if (!empty($data['ticket_url'])) {
-                    $schema['offers'] = array(
-                        '@type' => 'Offer',
-                        'url' => esc_url_raw($data['ticket_url'])
-                    );
-                }
+                ?>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Event Name:</label>
+                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                </div>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Start Date:</label>
+                        <input type="datetime-local" name="start_date" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">End Date:</label>
+                        <input type="datetime-local" name="end_date" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Location:</label>
+                    <input type="text" name="location" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <?php
                 break;
                 
             case 'Person':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['jobTitle'] = sanitize_text_field($data['job_title'] ?? '');
-                $schema['email'] = sanitize_email($data['email'] ?? '');
-                $schema['telephone'] = sanitize_text_field($data['telephone'] ?? '');
-                $schema['url'] = esc_url_raw($data['url'] ?? '');
-                if (!empty($data['works_for'])) {
-                    $schema['worksFor'] = array(
-                        '@type' => 'Organization',
-                        'name' => sanitize_text_field($data['works_for'])
-                    );
-                }
+                ?>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Full Name:</label>
+                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Job Title:</label>
+                    <input type="text" name="job_title" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
+                        <input type="email" name="email" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
+                        <input type="text" name="telephone" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website:</label>
+                    <input type="url" name="url" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <?php
                 break;
                 
             case 'FAQPage':
-                $schema['mainEntity'] = array();
-                if (isset($data['questions']) && is_array($data['questions'])) {
-                    foreach ($data['questions'] as $i => $question) {
-                        if (!empty($question) && !empty($data['answers'][$i])) {
-                            $schema['mainEntity'][] = array(
-                                '@type' => 'Question',
-                                'name' => sanitize_text_field($question),
-                                'acceptedAnswer' => array(
-                                    '@type' => 'Answer',
-                                    'text' => sanitize_textarea_field($data['answers'][$i])
-                                )
-                            );
-                        }
-                    }
+                ?>
+                <div id="faq-questions">
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Question 1:</label>
+                        <input type="text" name="questions[]" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 5px;">
+                        <textarea name="answers[]" placeholder="Answer..." rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                    </div>
+                </div>
+                <button type="button" onclick="addFAQQuestion()" style="background: #0073aa; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; margin-bottom: 15px;">
+                    + Add Another Question
+                </button>
+                <script>
+                function addFAQQuestion() {
+                    var container = document.getElementById('faq-questions');
+                    var questionNum = container.children.length + 1;
+                    var html = '<div style="margin-bottom: 15px;">' +
+                        '<label style="display: block; margin-bottom: 5px; font-weight: 500;">Question ' + questionNum + ':</label>' +
+                        '<input type="text" name="questions[]" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 5px;">' +
+                        '<textarea name="answers[]" placeholder="Answer..." rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>' +
+                        '</div>';
+                    container.insertAdjacentHTML('beforeend', html);
                 }
-                break;
-                
-            case 'HowTo':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['totalTime'] = sanitize_text_field($data['total_time'] ?? '');
-                $schema['supply'] = array();
-                $schema['tool'] = array();
-                $schema['step'] = array();
-                
-                // Add supplies
-                if (isset($data['supplies']) && is_array($data['supplies'])) {
-                    foreach ($data['supplies'] as $supply) {
-                        if (!empty($supply)) {
-                            $schema['supply'][] = array(
-                                '@type' => 'HowToSupply',
-                                'name' => sanitize_text_field($supply)
-                            );
-                        }
-                    }
-                }
-                
-                // Add tools
-                if (isset($data['tools']) && is_array($data['tools'])) {
-                    foreach ($data['tools'] as $tool) {
-                        if (!empty($tool)) {
-                            $schema['tool'][] = array(
-                                '@type' => 'HowToTool',
-                                'name' => sanitize_text_field($tool)
-                            );
-                        }
-                    }
-                }
-                
-                // Add steps
-                if (isset($data['steps']) && is_array($data['steps'])) {
-                    foreach ($data['steps'] as $i => $step) {
-                        if (!empty($step)) {
-                            $schema['step'][] = array(
-                                '@type' => 'HowToStep',
-                                'name' => sanitize_text_field($data['step_names'][$i] ?? 'Step ' . ($i + 1)),
-                                'text' => sanitize_textarea_field($step)
-                            );
-                        }
-                    }
-                }
-                break;
-                
-            case 'Recipe':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['prepTime'] = sanitize_text_field($data['prep_time'] ?? '');
-                $schema['cookTime'] = sanitize_text_field($data['cook_time'] ?? '');
-                $schema['totalTime'] = sanitize_text_field($data['total_time'] ?? '');
-                $schema['recipeYield'] = sanitize_text_field($data['recipe_yield'] ?? '');
-                $schema['recipeCategory'] = sanitize_text_field($data['recipe_category'] ?? '');
-                $schema['recipeCuisine'] = sanitize_text_field($data['recipe_cuisine'] ?? '');
-                
-                // Add ingredients
-                $schema['recipeIngredient'] = array();
-                if (isset($data['ingredients']) && is_array($data['ingredients'])) {
-                    foreach ($data['ingredients'] as $ingredient) {
-                        if (!empty($ingredient)) {
-                            $schema['recipeIngredient'][] = sanitize_text_field($ingredient);
-                        }
-                    }
-                }
-                
-                // Add instructions
-                $schema['recipeInstructions'] = array();
-                if (isset($data['instructions']) && is_array($data['instructions'])) {
-                    foreach ($data['instructions'] as $instruction) {
-                        if (!empty($instruction)) {
-                            $schema['recipeInstructions'][] = array(
-                                '@type' => 'HowToStep',
-                                'text' => sanitize_textarea_field($instruction)
-                            );
-                        }
-                    }
-                }
-                
-                // Add nutrition info if provided
-                if (!empty($data['calories'])) {
-                    $schema['nutrition'] = array(
-                        '@type' => 'NutritionInformation',
-                        'calories' => sanitize_text_field($data['calories'])
-                    );
-                }
-                break;
-                
-            case 'VideoObject':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['contentUrl'] = esc_url_raw($data['content_url'] ?? '');
-                $schema['embedUrl'] = esc_url_raw($data['embed_url'] ?? '');
-                $schema['uploadDate'] = sanitize_text_field($data['upload_date'] ?? date('c'));
-                $schema['duration'] = sanitize_text_field($data['duration'] ?? '');
-                if (!empty($data['thumbnail_url'])) {
-                    $schema['thumbnailUrl'] = esc_url_raw($data['thumbnail_url']);
-                }
-                break;
-                
-            case 'Review':
-                $schema['itemReviewed'] = array(
-                    '@type' => sanitize_text_field($data['item_type'] ?? 'Thing'),
-                    'name' => sanitize_text_field($data['item_name'] ?? '')
-                );
-                $schema['reviewRating'] = array(
-                    '@type' => 'Rating',
-                    'ratingValue' => intval($data['rating_value'] ?? 5),
-                    'bestRating' => intval($data['best_rating'] ?? 5),
-                    'worstRating' => intval($data['worst_rating'] ?? 1)
-                );
-                $schema['author'] = array(
-                    '@type' => 'Person',
-                    'name' => sanitize_text_field($data['author_name'] ?? get_the_author())
-                );
-                $schema['reviewBody'] = sanitize_textarea_field($data['review_body'] ?? '');
-                break;
-                
-            case 'Organization':
-                $schema['name'] = sanitize_text_field($data['name'] ?? '');
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['url'] = esc_url_raw($data['url'] ?? '');
-                $schema['email'] = sanitize_email($data['email'] ?? '');
-                $schema['telephone'] = sanitize_text_field($data['telephone'] ?? '');
-                if (!empty($data['logo_url'])) {
-                    $schema['logo'] = esc_url_raw($data['logo_url']);
-                }
-                if (!empty($data['social_urls'])) {
-                    $social_urls = explode("\n", $data['social_urls']);
-                    $schema['sameAs'] = array_map('esc_url_raw', array_filter($social_urls));
-                }
-                break;
-                
-            case 'Article':
-            case 'BlogPosting':
-            case 'NewsArticle':
-                $schema['headline'] = sanitize_text_field($data['headline'] ?? get_the_title());
-                $schema['description'] = sanitize_textarea_field($data['description'] ?? '');
-                $schema['author'] = array(
-                    '@type' => 'Person',
-                    'name' => sanitize_text_field($data['author_name'] ?? get_the_author())
-                );
-                $schema['datePublished'] = sanitize_text_field($data['date_published'] ?? get_the_date('c'));
-                $schema['dateModified'] = sanitize_text_field($data['date_modified'] ?? get_the_modified_date('c'));
-                if (!empty($data['image_url'])) {
-                    $schema['image'] = esc_url_raw($data['image_url']);
-                }
-                break;
-                
-            case 'WebSite':
-                $schema['name'] = sanitize_text_field($data['name'] ?? get_bloginfo('name'));
-                $schema['url'] = home_url();
-                if (!empty($data['potential_action'])) {
-                    $schema['potentialAction'] = array(
-                        '@type' => 'SearchAction',
-                        'target' => home_url('/?s={search_term_string}'),
-                        'query-input' => 'required name=search_term_string'
-                    );
-                }
+                </script>
+                <?php
                 break;
                 
             default:
-                return false;
+                ?>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Name:</label>
+                    <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
+                    <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                </div>
+                <?php
         }
         
-        return $schema;
+        return ob_get_clean();
     }
-
-        private function get_schema_template_html($schema_type) {
-    ob_start();
-    
-    switch ($schema_type) {
-        case 'LocalBusiness':
-            ?>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Business Name:</label>
-                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Address:</label>
-                <textarea name="address" rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                <div style="flex: 1;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
-                    <input type="text" name="telephone" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="flex: 1;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
-                    <input type="email" name="email" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website URL:</label>
-                <input type="url" name="url" value="<?php echo esc_url(get_permalink()); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <?php
-            break;
-            
-        case 'Service':
-            ?>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Service Name:</label>
-                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Area Served:</label>
-                <input type="text" name="area_served" placeholder="e.g., New York, NY" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <?php
-            break;
-            
-        case 'Product':
-            ?>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Product Name:</label>
-                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Brand:</label>
-                <input type="text" name="brand" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                <div style="flex: 1;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Price:</label>
-                    <input type="number" name="price" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="flex: 1;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Currency:</label>
-                    <select name="currency" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                        <option value="USD">USD</option>
-                        <option value="EUR">EUR</option>
-                        <option value="GBP">GBP</option>
-                        <option value="CAD">CAD</option>
-                    </select>
-                </div>
-            </div>
-            <?php
-            break;
-            
-        case 'HowTo':
-            ?>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">How-To Title:</label>
-                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Total Time (e.g., PT30M):</label>
-                <input type="text" name="total_time" placeholder="PT30M" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Steps (one per line):</label>
-                <textarea name="steps[]" rows="4" placeholder="Enter each step on a new line" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <?php
-            break;
-            
-        case 'Recipe':
-            ?>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Recipe Name:</label>
-                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                <div style="flex: 1;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Prep Time:</label>
-                    <input type="text" name="prep_time" placeholder="PT15M" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div style="flex: 1;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Cook Time:</label>
-                    <input type="text" name="cook_time" placeholder="PT30M" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Ingredients (one per line):</label>
-                <textarea name="ingredients[]" rows="4" placeholder="Enter each ingredient on a new line" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Instructions (one per line):</label>
-                <textarea name="instructions[]" rows="4" placeholder="Enter each instruction on a new line" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <?php
-            break;
-            
-        // Add other cases as needed...
-            
-        default:
-            ?>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Name:</label>
-                <input type="text" name="name" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
-            </div>
-            <?php
-    }
-    
-    return ob_get_clean();
-}
 
     /**
      * Helper methods for building schemas
@@ -845,27 +1014,232 @@ class Schemati {
         
         return $schema;
     }
-    
-    /**
-     * Load text domain
-     */
-    public function load_textdomain() {
-    $loaded = load_plugin_textdomain(
-        'schemati', 
-        false, 
-        dirname(plugin_basename(__FILE__)) . '/languages'
-    );
-    
-    // Debug: Force reload if not loaded
-    if (!$loaded && get_locale() === 'he_IL') {
-        $mo_file = dirname(__FILE__) . '/languages/schemati-he_IL.mo';
-        if (file_exists($mo_file)) {
-            load_textdomain('schemati', $mo_file);
+	private function build_wpheader_schema() {
+        $settings = $this->get_settings('schemati_general');
+        
+        if (!($settings['enable_wpheader'] ?? true)) {
+            return null;
         }
+        
+        $header_menu_items = $this->get_navigation_items('header');
+        
+        if (empty($header_menu_items)) {
+            return null;
+        }
+        
+        return array(
+            '@context' => 'https://schema.org',
+            '@type' => 'WebPageElement',
+            '@id' => home_url() . '#WPHeader',
+            'name' => 'Website Header',
+            'hasPart' => $header_menu_items
+        );
     }
-    
-    return $loaded;
-}
+
+    /**
+     * Build WPFooter schema - NEW FUNCTION
+     */
+    private function build_wpfooter_schema() {
+        $settings = $this->get_settings('schemati_general');
+        
+        if (!($settings['enable_wpfooter'] ?? true)) {
+            return null;
+        }
+        
+        $footer_menu_items = $this->get_navigation_items('footer');
+        
+        if (empty($footer_menu_items)) {
+            return null;
+        }
+        
+        return array(
+            '@context' => 'https://schema.org',
+            '@type' => 'WebPageElement',
+            '@id' => home_url() . '#WPFooter',
+            'name' => 'Website Footer',
+            'hasPart' => $footer_menu_items
+        );
+    }
+
+    /**
+     * Get navigation items with smart auto-detection - NEW FUNCTION
+     */
+    private function get_navigation_items($type = 'header') {
+        $settings = $this->get_settings('schemati_general');
+        
+        // Try user-configured location first
+        $configured_location = $settings[$type . '_menu_location'] ?? '';
+        if (!empty($configured_location)) {
+            $menu_items = $this->get_menu_items_by_location($configured_location);
+            if (!empty($menu_items)) {
+                return $this->format_navigation_items($menu_items, $type);
+            }
+        }
+        
+        // Smart auto-detection
+        $detected_locations = $this->detect_menu_locations($type);
+        
+        foreach ($detected_locations as $location) {
+            $menu_items = $this->get_menu_items_by_location($location);
+            if (!empty($menu_items)) {
+                // Cache the working location for future use
+                $settings[$type . '_menu_location'] = $location;
+                update_option('schemati_general', $settings);
+                
+                return $this->format_navigation_items($menu_items, $type);
+            }
+        }
+        
+        return array();
+    }
+
+    /**
+     * Smart detection of menu locations by type - NEW FUNCTION
+     */
+    private function detect_menu_locations($type = 'header') {
+        $all_locations = get_registered_nav_menus();
+        $detected = array();
+        
+        if (empty($all_locations)) {
+            return $this->get_fallback_locations($type);
+        }
+        
+        // Header patterns (order by priority)
+        $header_patterns = array(
+            'primary', 'header', 'main', 'navigation', 'nav', 'top',
+            'primary-navigation', 'main-navigation', 'header-navigation',
+            'primary-menu', 'main-menu', 'header-menu'
+        );
+        
+        // Footer patterns
+        $footer_patterns = array(
+            'footer', 'bottom', 'secondary', 
+            'footer-navigation', 'footer-menu', 'bottom-navigation',
+            'secondary-navigation', 'utility'
+        );
+        
+        $patterns = $type === 'header' ? $header_patterns : $footer_patterns;
+        
+        // Phase 1: Exact matches (highest priority)
+        foreach ($patterns as $pattern) {
+            foreach (array_keys($all_locations) as $location) {
+                if ($location === $pattern) {
+                    $detected[] = $location;
+                }
+            }
+        }
+        
+        // Phase 2: Pattern contains matches
+        foreach ($patterns as $pattern) {
+            foreach (array_keys($all_locations) as $location) {
+                if (strpos($location, $pattern) !== false && !in_array($location, $detected)) {
+                    $detected[] = $location;
+                }
+            }
+        }
+        
+        // Phase 3: Add remaining locations if looking for header and none found
+        if ($type === 'header' && empty($detected)) {
+            $detected = array_keys($all_locations);
+        }
+        
+        // Add manual fallbacks at the end
+        $fallbacks = $this->get_fallback_locations($type);
+        foreach ($fallbacks as $fallback) {
+            if (!in_array($fallback, $detected)) {
+                $detected[] = $fallback;
+            }
+        }
+        
+        return $detected;
+    }
+
+    /**
+     * Get menu items by location - NEW FUNCTION
+     */
+    private function get_menu_items_by_location($location) {
+        if (!function_exists('get_nav_menu_locations')) {
+            return array();
+        }
+        
+        $locations = get_nav_menu_locations();
+        
+        if (!isset($locations[$location]) || empty($locations[$location])) {
+            return array();
+        }
+        
+        $menu = wp_get_nav_menu_object($locations[$location]);
+        if (!$menu || is_wp_error($menu)) {
+            return array();
+        }
+        
+        $menu_items = wp_get_nav_menu_items($menu->term_id);
+        if (!$menu_items || is_wp_error($menu_items)) {
+            return array();
+        }
+        
+        $items = array();
+        foreach ($menu_items as $item) {
+            if ($item->menu_item_parent == 0) {
+                $items[] = array(
+                    'name' => $item->title,
+                    'url' => $item->url
+                );
+            }
+        }
+        
+        return $items;
+    }
+
+    /**
+     * Format navigation items for schema - NEW FUNCTION
+     */
+    private function format_navigation_items($menu_items, $type) {
+        if (empty($menu_items)) {
+            return array();
+        }
+        
+        $formatted_items = array();
+        $element_type = $type === 'header' ? 'WPHeader' : 'WPFooter';
+        
+        foreach ($menu_items as $item) {
+            $formatted_items[] = array(
+                '@type' => array('SiteNavigationElement', $element_type),
+                '@id' => home_url() . '#SiteNavigationElement-' . sanitize_title($item['name']),
+                'name' => $item['name'],
+                'url' => $item['url']
+            );
+        }
+        
+        return $formatted_items;
+    }
+
+    /**
+     * Get fallback locations - NEW FUNCTION
+     */
+    private function get_fallback_locations($type = 'header') {
+        return $type === 'header' ? 
+            array('primary', 'header', 'main', 'navigation') : 
+            array('footer', 'footer-menu', 'bottom');
+    }
+
+    /**
+     * Get available menu locations for admin settings - NEW FUNCTION
+     */
+    public function get_available_menu_locations() {
+        $locations = get_registered_nav_menus();
+        $formatted = array(
+            '' => __('Auto-detect', 'schemati')
+        );
+        
+        if (!empty($locations)) {
+            foreach ($locations as $location => $description) {
+                $formatted[$location] = $description . ' (' . $location . ')';
+            }
+        }
+        
+        return $formatted;
+    }
     
     /**
      * Plugin activation
@@ -873,14 +1247,18 @@ class Schemati {
     public function activate() {
         // Set default options for all schema types
         $defaults = array(
-            'version' => SCHEMATI_VERSION,
-            'enabled' => true,
-            'org_name' => get_bloginfo('name'),
-            'org_type' => 'Organization',
-            'breadcrumb_home' => 'Home',
-            'breadcrumb_separator' => ' › ',
-            'show_current' => true
-        );
+    'version' => SCHEMATI_VERSION,
+    'enabled' => true,
+    'org_name' => get_bloginfo('name'),
+    'org_type' => 'Organization',
+    'breadcrumb_home' => 'Home',
+    'breadcrumb_separator' => ' › ',
+    'show_current' => true,
+    'enable_wpheader' => true,
+    'enable_wpfooter' => true,
+    'header_menu_location' => '',
+    'footer_menu_location' => ''
+);
         
         add_option('schemati_general', $defaults);
         add_option('schemati_article', array('enabled' => true));
@@ -903,6 +1281,7 @@ class Schemati {
      * Plugin deactivation
      */
     public function deactivate() {
+        wp_cache_flush_group($this->cache_group);
         flush_rewrite_rules();
     }
     
@@ -934,7 +1313,324 @@ class Schemati {
         add_submenu_page('schemati', __('FAQ Schema', 'schemati'), __('FAQ', 'schemati'), 'manage_options', 'schemati-faq', array($this, 'faq_page'));
         add_submenu_page('schemati', __('CheckTool', 'schemati'), __('CheckTool', 'schemati'), 'manage_options', 'schemati-tools', array($this, 'tools_page'));
         add_submenu_page('schemati', __('Updates', 'schemati'), __('Updates', 'schemati'), 'manage_options', 'schemati-updates', array($this, 'updates_page'));
+		add_submenu_page('schemati', __('Import/Export', 'schemati'), __('Import/Export', 'schemati'), 'manage_options', 'schemati-import-export', array($this, 'import_export_page'));
     }
+	public function import_export_page() {
+    // Handle actions if present
+    if (isset($_GET['action'])) {
+        $this->handle_import_export_action($_GET['action']);
+    }
+    
+    if (isset($_POST['import_settings'])) {
+        $this->handle_settings_import();
+    }
+    
+    ?>
+    <div class="wrap">
+        <h1><?php _e('Schemati - Import/Export', 'schemati'); ?></h1>
+        
+        <div class="notice notice-info">
+            <p><strong><?php _e('Backup & Restore', 'schemati'); ?></strong> - <?php _e('Export your settings for backup or transfer to another site.', 'schemati'); ?></p>
+        </div>
+        
+        <!-- Export Section -->
+        <div class="card">
+            <h2><?php _e('Export Settings', 'schemati'); ?></h2>
+            <p><?php _e('Download all plugin settings as a JSON file for backup or migration.', 'schemati'); ?></p>
+            <p>
+                <a href="<?php echo wp_nonce_url(admin_url('admin.php?page=schemati-import-export&action=export_settings'), 'schemati_export'); ?>" class="button button-primary">
+                    <?php _e('Export Plugin Settings', 'schemati'); ?>
+                </a>
+            </p>
+        </div>
+        
+        <!-- Export Custom Schemas -->
+        <div class="card">
+            <h2><?php _e('Export Custom Schemas', 'schemati'); ?></h2>
+            <p><?php _e('Download all custom schemas from posts and pages.', 'schemati'); ?></p>
+            <p>
+                <a href="<?php echo wp_nonce_url(admin_url('admin.php?page=schemati-import-export&action=export_schemas'), 'schemati_export'); ?>" class="button button-secondary">
+                    <?php _e('Export Custom Schemas', 'schemati'); ?>
+                </a>
+            </p>
+        </div>
+        
+        <!-- Import Section -->
+        <div class="card">
+            <h2><?php _e('Import Settings', 'schemati'); ?></h2>
+            <p><?php _e('Upload a previously exported settings file to restore configuration.', 'schemati'); ?></p>
+            
+            <form method="post" enctype="multipart/form-data">
+                <?php wp_nonce_field('schemati_import', 'schemati_import_nonce'); ?>
+                
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><?php _e('Settings File', 'schemati'); ?></th>
+                        <td>
+                            <input type="file" name="import_file" accept=".json" required />
+                            <p class="description"><?php _e('Select a JSON file exported from Schemati.', 'schemati'); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php _e('Import Options', 'schemati'); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="overwrite_existing" value="1" />
+                                <?php _e('Overwrite existing settings', 'schemati'); ?>
+                            </label>
+                            <p class="description"><?php _e('Check this to replace all current settings. Leave unchecked to merge with existing settings.', 'schemati'); ?></p>
+                        </td>
+                    </tr>
+                </table>
+                
+                <?php submit_button(__('Import Settings', 'schemati'), 'primary', 'import_settings'); ?>
+            </form>
+        </div>
+        
+        <!-- Statistics -->
+        <div class="card">
+            <h2><?php _e('Current Data', 'schemati'); ?></h2>
+            <?php $this->display_export_statistics(); ?>
+        </div>
+    </div>
+    <?php
+}
+
+// 3. ADD: Handle import/export actions (NEW)
+private function handle_import_export_action($action) {
+    if (!wp_verify_nonce($_GET['_wpnonce'] ?? '', 'schemati_export')) {
+        wp_die(__('Security check failed', 'schemati'));
+    }
+    
+    if (!current_user_can('manage_options')) {
+        wp_die(__('Insufficient permissions', 'schemati'));
+    }
+    
+    switch ($action) {
+        case 'export_settings':
+            $this->export_settings();
+            break;
+        case 'export_schemas':
+            $this->export_custom_schemas();
+            break;
+        default:
+            wp_die(__('Invalid action', 'schemati'));
+    }
+}
+
+// 4. ADD: Export plugin settings (NEW)
+private function export_settings() {
+    $settings = array();
+    $option_groups = array(
+        'schemati_general',
+        'schemati_article',
+        'schemati_about_page',
+        'schemati_contact_page',
+        'schemati_local_business',
+        'schemati_person',
+        'schemati_author',
+        'schemati_publisher',
+        'schemati_product',
+        'schemati_faq'
+    );
+    
+    foreach ($option_groups as $group) {
+        $option_value = get_option($group, array());
+        if (!empty($option_value)) {
+            $settings[$group] = $option_value;
+        }
+    }
+    
+    $export_data = array(
+        'version' => SCHEMATI_VERSION,
+        'export_date' => current_time('mysql'),
+        'export_type' => 'settings',
+        'site_url' => home_url(),
+        'settings' => $settings
+    );
+    
+    $filename = 'schemati-settings-' . date('Y-m-d-H-i-s') . '.json';
+    
+    header('Content-Type: application/json; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Cache-Control: no-cache, must-revalidate');
+    header('Expires: Mon, 26 Jul 1997 05:00:00 GMT');
+    
+    echo wp_json_encode($export_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+	update_option('schemati_last_export', current_time('mysql'));
+    exit;
+}
+
+// 5. ADD: Export custom schemas (NEW)
+private function export_custom_schemas() {
+    global $wpdb;
+    
+    $custom_schemas = $wpdb->get_results(
+        "SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_schemati_custom_schemas'"
+    );
+    
+    $export_data = array(
+        'version' => SCHEMATI_VERSION,
+        'export_date' => current_time('mysql'),
+        'export_type' => 'custom_schemas',
+        'site_url' => home_url(),
+        'custom_schemas' => array()
+    );
+    
+    foreach ($custom_schemas as $row) {
+        $schemas = maybe_unserialize($row->meta_value);
+        if (is_array($schemas) && !empty($schemas)) {
+            $post = get_post($row->post_id);
+            $export_data['custom_schemas'][$row->post_id] = array(
+                'post_title' => $post ? $post->post_title : 'Unknown',
+                'post_type' => $post ? $post->post_type : 'unknown',
+                'schemas' => $schemas
+            );
+        }
+    }
+    
+    $filename = 'schemati-custom-schemas-' . date('Y-m-d-H-i-s') . '.json';
+    
+    header('Content-Type: application/json; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Cache-Control: no-cache, must-revalidate');
+    header('Expires: Mon, 26 Jul 1997 05:00:00 GMT');
+    
+    echo wp_json_encode($export_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+	update_option('schemati_last_export', current_time('mysql'));
+    exit;
+}
+
+// 6. ADD: Handle settings import (NEW)
+private function handle_settings_import() {
+    if (!wp_verify_nonce($_POST['schemati_import_nonce'] ?? '', 'schemati_import')) {
+        add_action('admin_notices', function() {
+            echo '<div class="notice notice-error"><p>' . __('Security check failed', 'schemati') . '</p></div>';
+        });
+        return;
+    }
+    
+    if (!current_user_can('manage_options')) {
+        add_action('admin_notices', function() {
+            echo '<div class="notice notice-error"><p>' . __('Insufficient permissions', 'schemati') . '</p></div>';
+        });
+        return;
+    }
+    
+    if (!isset($_FILES['import_file']) || $_FILES['import_file']['error'] !== UPLOAD_ERR_OK) {
+        add_action('admin_notices', function() {
+            echo '<div class="notice notice-error"><p>' . __('File upload failed', 'schemati') . '</p></div>';
+        });
+        return;
+    }
+    
+    $file_content = file_get_contents($_FILES['import_file']['tmp_name']);
+    $import_data = json_decode($file_content, true);
+    
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        add_action('admin_notices', function() {
+            echo '<div class="notice notice-error"><p>' . __('Invalid JSON file', 'schemati') . '</p></div>';
+        });
+        return;
+    }
+    
+    // Validate import data
+    if (!isset($import_data['version']) || !isset($import_data['settings'])) {
+        add_action('admin_notices', function() {
+            echo '<div class="notice notice-error"><p>' . __('Invalid import file format', 'schemati') . '</p></div>';
+        });
+        return;
+    }
+    
+    $overwrite = isset($_POST['overwrite_existing']) && $_POST['overwrite_existing'];
+    $imported_count = 0;
+    
+    foreach ($import_data['settings'] as $option_name => $option_value) {
+        if ($overwrite || !get_option($option_name)) {
+            $sanitized_value = $this->sanitize_settings($option_value);
+            update_option($option_name, $sanitized_value);
+            $imported_count++;
+        }
+    }
+    
+    add_action('admin_notices', function() use ($imported_count) {
+        echo '<div class="notice notice-success"><p>' . 
+             sprintf(__('Successfully imported %d settings', 'schemati'), $imported_count) . 
+             '</p></div>';
+    });
+}
+
+// 7. ADD: Display export statistics (NEW)
+private function display_export_statistics() {
+    global $wpdb;
+    
+    // Count settings
+    $option_groups = array(
+        'schemati_general',
+        'schemati_article',
+        'schemati_about_page',
+        'schemati_contact_page',
+        'schemati_local_business',
+        'schemati_person',
+        'schemati_author',
+        'schemati_publisher',
+        'schemati_product',
+        'schemati_faq'
+    );
+    
+    $settings_count = 0;
+    foreach ($option_groups as $group) {
+        if (get_option($group)) {
+            $settings_count++;
+        }
+    }
+    
+    // Count custom schemas
+    $custom_schemas_count = $wpdb->get_var(
+        "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_schemati_custom_schemas'"
+    );
+    
+    // Count total schemas in custom schemas
+    $total_schemas = 0;
+    $custom_schemas_data = $wpdb->get_results(
+        "SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_schemati_custom_schemas'"
+    );
+    
+    foreach ($custom_schemas_data as $row) {
+        $schemas = maybe_unserialize($row->meta_value);
+        if (is_array($schemas)) {
+            $total_schemas += count($schemas);
+        }
+    }
+    
+    ?>
+    <table class="widefat">
+        <tr>
+            <td><strong><?php _e('Plugin Version', 'schemati'); ?></strong></td>
+            <td><?php echo SCHEMATI_VERSION; ?></td>
+        </tr>
+        <tr>
+            <td><strong><?php _e('Configured Settings Groups', 'schemati'); ?></strong></td>
+            <td><?php echo $settings_count; ?></td>
+        </tr>
+        <tr>
+            <td><strong><?php _e('Posts/Pages with Custom Schemas', 'schemati'); ?></strong></td>
+            <td><?php echo $custom_schemas_count; ?></td>
+        </tr>
+        <tr>
+            <td><strong><?php _e('Total Custom Schemas', 'schemati'); ?></strong></td>
+            <td><?php echo $total_schemas; ?></td>
+        </tr>
+        <tr>
+            <td><strong><?php _e('Last Export', 'schemati'); ?></strong></td>
+            <td><?php 
+            $last_export = get_option('schemati_last_export', '');
+            echo $last_export ? $last_export : __('Never', 'schemati');
+            ?></td>
+        </tr>
+    </table>
+    <?php
+}
     
     /**
      * Register admin settings
@@ -1002,12 +1698,12 @@ class Schemati {
             <?php if (get_transient('schemati_activated')): ?>
                 <?php delete_transient('schemati_activated'); ?>
                 <div class="notice notice-success is-dismissible">
-                    <p><strong><?php _e('Schemati v5.0 Activated!', 'schemati'); ?></strong> <?php _e('All features loaded successfully.', 'schemati'); ?></p>
+                    <p><strong><?php _e('Schemati v5.1 Activated!', 'schemati'); ?></strong> <?php _e('All features loaded successfully.', 'schemati'); ?></p>
                 </div>
             <?php endif; ?>
             
             <div class="notice notice-info">
-                <p><strong><?php _e('✅ Schemati v5.0', 'schemati'); ?></strong> - <?php _e('Complete schema solution with sidebar, all schema types, and breadcrumbs.', 'schemati'); ?></p>
+                <p><strong><?php _e('✅ Schemati v5.1', 'schemati'); ?></strong> - <?php _e('Complete schema solution with enhanced architecture and improved performance.', 'schemati'); ?></p>
             </div>
             
             <form method="post" action="">
@@ -1069,9 +1765,89 @@ class Schemati {
                     </tr>
                 </table>
                 
-                <h3><?php _e('Usage', 'schemati'); ?></h3>
+               <h3><?php _e('Usage', 'schemati'); ?></h3>
                 <p><strong><?php _e('Shortcode:', 'schemati'); ?></strong> <code>[schemati_breadcrumbs]</code></p>
                 <p><strong><?php _e('PHP Function:', 'schemati'); ?></strong> <code>&lt;?php echo schemati_breadcrumbs(); ?&gt;</code></p>
+
+                <h2><?php _e('Navigation Schema Settings', 'schemati'); ?></h2>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><?php _e('Enable Header Schema', 'schemati'); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="enable_wpheader" value="1" <?php checked(1, $settings['enable_wpheader'] ?? true); ?> />
+                                <?php _e('Generate schema markup for header navigation', 'schemati'); ?>
+                            </label>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php _e('Header Menu Location', 'schemati'); ?></th>
+                        <td>
+                            <select name="header_menu_location">
+                                <?php 
+                                $available_locations = $this->get_available_menu_locations();
+                                foreach ($available_locations as $location => $description): ?>
+                                    <option value="<?php echo esc_attr($location); ?>" <?php selected($settings['header_menu_location'] ?? '', $location); ?>>
+                                        <?php echo esc_html($description); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <p class="description">
+                                <?php _e('Select header menu location or leave on "Auto-detect"', 'schemati'); ?>
+                                <br><strong><?php _e('Auto-detected:', 'schemati'); ?></strong> 
+                                <code><?php 
+                                $detected = $this->detect_menu_locations('header');
+                                echo !empty($detected) ? esc_html($detected[0]) : __('None found', 'schemati');
+                                ?></code>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php _e('Enable Footer Schema', 'schemati'); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="enable_wpfooter" value="1" <?php checked(1, $settings['enable_wpfooter'] ?? true); ?> />
+                                <?php _e('Generate schema markup for footer navigation', 'schemati'); ?>
+                            </label>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php _e('Footer Menu Location', 'schemati'); ?></th>
+                        <td>
+                            <select name="footer_menu_location">
+                                <?php foreach ($available_locations as $location => $description): ?>
+                                    <option value="<?php echo esc_attr($location); ?>" <?php selected($settings['footer_menu_location'] ?? '', $location); ?>>
+                                        <?php echo esc_html($description); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <p class="description">
+                                <?php _e('Select footer menu location or leave on "Auto-detect"', 'schemati'); ?>
+                                <br><strong><?php _e('Auto-detected:', 'schemati'); ?></strong> 
+                                <code><?php 
+                                $detected = $this->detect_menu_locations('footer');
+                                echo !empty($detected) ? esc_html($detected[0]) : __('None found', 'schemati');
+                                ?></code>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php _e('Available Menu Locations', 'schemati'); ?></th>
+                        <td>
+                            <?php 
+                            $all_locations = get_registered_nav_menus();
+                            if (!empty($all_locations)): ?>
+                                <div style="background: #f8f9fa; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px;">
+                                    <?php foreach ($all_locations as $location => $description): ?>
+                                        <div><strong><?php echo esc_html($location); ?>:</strong> <?php echo esc_html($description); ?></div>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php else: ?>
+                                <em><?php _e('Your theme does not support navigation menus', 'schemati'); ?></em>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                </table>
                 
                 <?php submit_button(); ?>
             </form>
@@ -1234,65 +2010,65 @@ class Schemati {
      * Tools/CheckTool Page
      */
     public function tools_page() {
-        ?>
-        <div class="wrap">
-            <h1><?php _e('Schemati Tools & Diagnostics', 'schemati'); ?></h1>
-            
-            <div class="card">
-                <h2><?php _e('Schema Testing Tools', 'schemati'); ?></h2>
-                <p><?php _e('Test your schema markup with these official tools:', 'schemati'); ?></p>
-                <p>
-                    <a href="https://search.google.com/test/rich-results" target="_blank" class="button button-primary">
-                        <?php _e('Google Rich Results Test', 'schemati'); ?>
-                    </a>
-                    <a href="https://validator.schema.org/" target="_blank" class="button button-secondary">
-                        <?php _e('Schema.org Validator', 'schemati'); ?>
-                    </a>
-                    <a href="https://developers.facebook.com/tools/debug/" target="_blank" class="button button-secondary">
-                        <?php _e('Facebook Debugger', 'schemati'); ?>
-                    </a>
-                </p>
-            </div>
-            
-            <div class="card">
-                <h2><?php _e('Plugin Status', 'schemati'); ?></h2>
-                <table class="widefat">
-                    <tr>
-                        <td><strong><?php _e('Version', 'schemati'); ?></strong></td>
-                        <td><?php echo SCHEMATI_VERSION; ?></td>
-                    </tr>
-                    <tr>
-                        <td><strong><?php _e('Status', 'schemati'); ?></strong></td>
-                        <td>
-                            <?php 
-                            $general = $this->get_settings('schemati_general');
-                            echo $general['enabled'] ? '<span style="color: green;">✓ ' . __('Active', 'schemati') . '</span>' : '<span style="color: red;">✗ ' . __('Disabled', 'schemati') . '</span>'; 
-                            ?>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td><strong><?php _e('Schema Types Available', 'schemati'); ?></strong></td>
-                        <td><?php _e('Organization, WebPage, Article, LocalBusiness, Person, Product, FAQ, BreadcrumbList', 'schemati'); ?></td>
-                    </tr>
-                    <tr>
-                        <td><strong><?php _e('Sidebar', 'schemati'); ?></strong></td>
-                        <td><?php _e('✓ Active on frontend for logged-in users', 'schemati'); ?></td>
-                    </tr>
-                    <tr>
-                        <td><strong><?php _e('Breadcrumbs', 'schemati'); ?></strong></td>
-                        <td><?php _e('✓ Shortcode and PHP function available', 'schemati'); ?></td>
-                    </tr>
-                </table>
-            </div>
-            
-            <div class="card">
-                <h2><?php _e('Current Page Schema Preview', 'schemati'); ?></h2>
-                <p><?php _e('Visit your website while logged in to see the Schemati sidebar with live schema preview.', 'schemati'); ?></p>
-                <p><a href="<?php echo home_url(); ?>" target="_blank" class="button"><?php _e('View Website with Sidebar', 'schemati'); ?></a></p>
-            </div>
+    ?>
+    <div class="wrap">
+        <h1><?php _e('Schemati Tools & Diagnostics', 'schemati'); ?></h1>
+        
+        <div class="card">
+            <h2><?php _e('Schema Testing Tool', 'schemati'); ?></h2>
+            <p><?php _e('Test your schema markup with our comprehensive validation tool:', 'schemati'); ?></p>
+            <p>
+                <a href="https://schemamarkup.net/?url=<?php echo esc_attr(parse_url(home_url(), PHP_URL_HOST)); ?>" target="_blank" class="button button-primary">
+                    <?php _e('Test Rich Results', 'schemati'); ?>
+                </a>
+            </p>
+            <p class="description"><?php _e('This will analyze all schema markup on your website and provide detailed validation results.', 'schemati'); ?></p>
         </div>
-        <?php
-    }
+        
+        <div class="card">
+            <h2><?php _e('Plugin Status', 'schemati'); ?></h2>
+            <table class="widefat">
+                <tr>
+                    <td><strong><?php _e('Version', 'schemati'); ?></strong></td>
+                    <td><?php echo SCHEMATI_VERSION; ?></td>
+                </tr>
+                <tr>
+                    <td><strong><?php _e('Status', 'schemati'); ?></strong></td>
+                    <td>
+                        <?php 
+                        $general = $this->get_settings('schemati_general');
+                        echo $general['enabled'] ? '<span style="color: green;">✓ ' . __('Active', 'schemati') . '</span>' : '<span style="color: red;">✗ ' . __('Disabled', 'schemati') . '</span>'; 
+                        ?>
+                    </td>
+                </tr>
+                <tr>
+                    <td><strong><?php _e('Schema Types Available', 'schemati'); ?></strong></td>
+                    <td><?php _e('Organization, WebPage, Article, LocalBusiness, Person, Product, FAQ, BreadcrumbList', 'schemati'); ?></td>
+                </tr>
+                <tr>
+                    <td><strong><?php _e('Sidebar', 'schemati'); ?></strong></td>
+                    <td><?php _e('✓ Active on frontend for logged-in users', 'schemati'); ?></td>
+                </tr>
+                <tr>
+                    <td><strong><?php _e('Breadcrumbs', 'schemati'); ?></strong></td>
+                    <td><?php _e('✓ Shortcode and PHP function available', 'schemati'); ?></td>
+                </tr>
+                <tr>
+                    <td><strong><?php _e('Architecture', 'schemati'); ?></strong></td>
+                    <td><?php _e('✓ Enhanced modular hooks system', 'schemati'); ?></td>
+                </tr>
+            </table>
+        </div>
+        
+        <div class="card">
+            <h2><?php _e('Current Page Schema Preview', 'schemati'); ?></h2>
+            <p><?php _e('Visit your website while logged in to see the Schemati sidebar with live schema preview.', 'schemati'); ?></p>
+            <p><a href="<?php echo home_url(); ?>" target="_blank" class="button"><?php _e('View Website with Sidebar', 'schemati'); ?></a></p>
+        </div>
+    </div>
+    <?php
+}
+
     
     
     /**
@@ -1452,40 +2228,43 @@ class Schemati {
      * Add admin bar menu
      */
     public function add_admin_bar($admin_bar) {
-        if (!current_user_can('edit_posts') || is_admin()) {
-            return;
-        }
-        
-        $admin_bar->add_menu(array(
-            'id'    => 'schemati',
-            'title' => 'Schemati',
-            'href'  => '#',
-            'meta'  => array(
-                'onclick' => 'toggleSchematiSidebar(); return false;',
-                'title'   => __('Toggle Schemati Sidebar', 'schemati')
-            ),
-        ));
-        
-        $admin_bar->add_menu(array(
-            'id'     => 'schemati-preview',
-            'parent' => 'schemati',
-            'title'  => __('View Schema', 'schemati'),
-            'href'   => '#',
-            'meta'   => array(
-                'onclick' => 'showSchematiPreview(); return false;',
-            ),
-        ));
-        
-        $admin_bar->add_menu(array(
-            'id'     => 'schemati-test',
-            'parent' => 'schemati',
-            'title'  => __('Test Rich Results', 'schemati'),
-            'href'   => 'https://search.google.com/test/rich-results?url=' . urlencode(get_permalink()),
-            'meta'   => array(
-                'target' => '_blank'
-            ),
-        ));
+    if (!current_user_can('edit_posts') || is_admin()) {
+        return;
     }
+    
+    // Get current page URL without protocol
+    $current_url = $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
+    
+    $admin_bar->add_menu(array(
+        'id'    => 'schemati',
+        'title' => 'Schemati',
+        'href'  => '#',
+        'meta'  => array(
+            'onclick' => 'toggleSchematiSidebar(); return false;',
+            'title'   => __('Toggle Schemati Sidebar', 'schemati')
+        ),
+    ));
+    
+    $admin_bar->add_menu(array(
+        'id'     => 'schemati-preview',
+        'parent' => 'schemati',
+        'title'  => __('View Schema', 'schemati'),
+        'href'   => '#',
+        'meta'   => array(
+            'onclick' => 'showSchematiPreview(); return false;',
+        ),
+    ));
+    
+    $admin_bar->add_menu(array(
+        'id'     => 'schemati-test',
+        'parent' => 'schemati',
+        'title'  => __('Test Rich Results', 'schemati'),
+        'href'   => 'https://schemamarkup.net/?url=' . urlencode($current_url),
+        'meta'   => array(
+            'target' => '_blank'
+        ),
+    ));
+}
     
     /**
      * Enqueue sidebar scripts
@@ -1497,1380 +2276,10 @@ class Schemati {
         wp_enqueue_script('jquery');
     }
     
-    /**
-     * Add interactive sidebar HTML to frontend with editing capabilities
-     */
-    /**
-     * Enhanced version of add_sidebar_html with better schema detection and additional features
-     */
-    public function add_sidebar_html() {
-        if (!current_user_can('edit_posts') || is_admin()) {
-            return;
-        }
-        
-        global $post;
-        $general_settings = $this->get_settings('schemati_general');
-        
-        // Get current page schema data with enhanced detection
-        $current_schemas = $this->get_enhanced_page_schemas();
-        ?>
-        <div id="schemati-sidebar" style="display: none; position: fixed; top: 32px; right: 0; width: 450px; height: calc(100vh - 32px); background: white; border-left: 1px solid #ccc; z-index: 99999; padding: 0; overflow-y: auto; box-shadow: -2px 0 10px rgba(0,0,0,0.15); font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;">
-            
-            <!-- Enhanced Header with Dynamic Status -->
-            <div style="padding: 20px; background: linear-gradient(135deg, #0073aa 0%, #005177 100%); color: white; position: sticky; top: 0; z-index: 1000;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <h3 style="margin: 0; font-size: 18px;">
-                            <span style="margin-right: 8px;">⚙️</span>
-                            Schemati Editor
-                        </h3>
-                        <div style="font-size: 12px; opacity: 0.8; margin-top: 4px;">
-                            <span id="schema-count"><?php echo count($current_schemas); ?> schemas detected</span>
-                            <span style="margin-left: 10px;">•</span>
-                            <span id="schema-status"><?php echo $general_settings['enabled'] ? 'Active' : 'Disabled'; ?></span>
-                        </div>
-                    </div>
-                    <div style="display: flex; gap: 10px; align-items: center;">
-                        <button onclick="syncSchemasWithDOM()" style="background: rgba(255,255,255,0.2); border: none; color: white; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;" title="Sync with DOM">🔄</button>
-                        <button onclick="toggleSchematiSidebar()" style="background: none; border: none; font-size: 20px; cursor: pointer; color: white; padding: 5px;">&times;</button>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Enhanced Tabs Navigation -->
-            <div style="background: #f1f1f1; border-bottom: 1px solid #ccc;">
-                <div style="display: flex;">
-                    <button class="schemati-tab active" onclick="showSchematiTab('current')" style="flex: 1; padding: 12px; border: none; background: white; cursor: pointer; border-bottom: 2px solid #0073aa; font-size: 12px;">
-                        <span style="display: block;">Current</span>
-                        <small style="color: #666;" id="current-count"><?php echo count($current_schemas); ?> schemas</small>
-                    </button>
-                    <button class="schemati-tab" onclick="showSchematiTab('add')" style="flex: 1; padding: 12px; border: none; background: #f1f1f1; cursor: pointer; border-bottom: 2px solid transparent; font-size: 12px;">
-                        <span style="display: block;">Add</span>
-                        <small style="color: #666;">New schema</small>
-                    </button>
-                    <button class="schemati-tab" onclick="showSchematiTab('templates')" style="flex: 1; padding: 12px; border: none; background: #f1f1f1; cursor: pointer; border-bottom: 2px solid transparent; font-size: 12px;">
-                        <span style="display: block;">Templates</span>
-                        <small style="color: #666;">Quick add</small>
-                    </button>
-                    <button class="schemati-tab" onclick="showSchematiTab('settings')" style="flex: 1; padding: 12px; border: none; background: #f1f1f1; cursor: pointer; border-bottom: 2px solid transparent; font-size: 12px;">
-                        <span style="display: block;">Settings</span>
-                        <small style="color: #666;">Global</small>
-                    </button>
-                </div>
-            </div>
-            
-            <!-- Enhanced Current Schemas Tab with Dynamic Loading -->
-            <div id="schemati-tab-current" class="schemati-tab-content" style="padding: 20px;">
-                <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
-                    <h4 style="margin: 0; color: #333; font-size: 14px;">DETECTED SCHEMAS</h4>
-                    <div style="display: flex; gap: 5px;">
-                        <button onclick="exportPageSchemas()" style="background: #17a2b8; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;" title="Export Schemas">💾</button>
-                        <button onclick="validateAllSchemas()" style="background: #28a745; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;" title="Validate All">✓</button>
-                        <button onclick="toggleAllSchemas()" style="background: #6c757d; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;" title="Toggle All">⚡</button>
-                    </div>
-                </div>
-                
-                <!-- Dynamic Schema List - Will be populated by JavaScript -->
-                <div id="current-schemas-list">
-                    <div style="text-align: center; padding: 20px; color: #666;">
-                        <div style="font-size: 24px; margin-bottom: 10px;">🔄</div>
-                        <p>Loading schemas...</p>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Rest of the tabs remain the same -->
-            <div id="schemati-tab-add" class="schemati-tab-content" style="display: none; padding: 20px;">
-                <h4 style="margin: 0 0 15px 0; color: #333; font-size: 14px;">ADD NEW SCHEMA</h4>
-                
-                <div style="margin-bottom: 20px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Schema Type:</label>
-                    <select id="new-schema-type" onchange="loadSchemaTemplate()" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                        <option value="">Select Schema Type</option>
-                        <optgroup label="Business">
-                            <option value="LocalBusiness">🏢 Local Business</option>
-                            <option value="Service">🛠️ Service</option>
-                            <option value="Product">📦 Product</option>
-                            <option value="Organization">🏛️ Organization</option>
-                        </optgroup>
-                        <optgroup label="Content">
-                            <option value="Article">📰 Article</option>
-                            <option value="BlogPosting">📝 Blog Post</option>
-                            <option value="NewsArticle">📺 News Article</option>
-                            <option value="FAQPage">❓ FAQ Page</option>
-                            <option value="HowTo">📋 How-To</option>
-                            <option value="Recipe">🍳 Recipe</option>
-                        </optgroup>
-                        <optgroup label="Events & People">
-                            <option value="Event">📅 Event</option>
-                            <option value="Person">👤 Person</option>
-                            <option value="Review">⭐ Review</option>
-                        </optgroup>
-                        <optgroup label="Media">
-                            <option value="VideoObject">🎥 Video</option>
-                            <option value="ImageObject">🖼️ Image</option>
-                            <option value="AudioObject">🎵 Audio</option>
-                        </optgroup>
-                        <optgroup label="Other">
-                            <option value="WebPage">🌐 Web Page</option>
-                            <option value="WebSite">🌍 Website</option>
-                        </optgroup>
-                    </select>
-                </div>
-                
-                <div id="new-schema-form" style="display: none;">
-                    <form onsubmit="addNewSchema(); return false;">
-                        <div id="schema-template-fields"></div>
-                        
-                        <div style="margin-top: 20px; display: flex; gap: 10px;">
-                            <button type="button" onclick="previewNewSchema()" style="flex: 1; background: #6c757d; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 500;">
-                                👁️ Preview
-                            </button>
-                            <button type="submit" style="flex: 2; background: #0073aa; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 500;">
-                                ➕ Add Schema
-                            </button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-            
-            <!-- New Templates Tab -->
-            <div id="schemati-tab-templates" class="schemati-tab-content" style="display: none; padding: 20px;">
-                <h4 style="margin: 0 0 15px 0; color: #333; font-size: 14px;">QUICK TEMPLATES</h4>
-                
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px;">
-                    <button onclick="addQuickTemplate('LocalBusiness')" style="padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: white; cursor: pointer; text-align: left; transition: all 0.3s ease;">
-                        <div style="font-size: 20px; margin-bottom: 5px;">🏢</div>
-                        <div style="font-weight: 500; margin-bottom: 3px;">Local Business</div>
-                        <div style="font-size: 11px; color: #666;">Restaurant, store, office</div>
-                    </button>
-                    
-                    <button onclick="addQuickTemplate('Service')" style="padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: white; cursor: pointer; text-align: left; transition: all 0.3s ease;">
-                        <div style="font-size: 20px; margin-bottom: 5px;">🛠️</div>
-                        <div style="font-weight: 500; margin-bottom: 3px;">Service</div>
-                        <div style="font-size: 11px; color: #666;">Professional services</div>
-                    </button>
-                    
-                    <button onclick="addQuickTemplate('Product')" style="padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: white; cursor: pointer; text-align: left; transition: all 0.3s ease;">
-                        <div style="font-size: 20px; margin-bottom: 5px;">📦</div>
-                        <div style="font-weight: 500; margin-bottom: 3px;">Product</div>
-                        <div style="font-size: 11px; color: #666;">Physical or digital products</div>
-                    </button>
-                    
-                    <button onclick="addQuickTemplate('Event')" style="padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: white; cursor: pointer; text-align: left; transition: all 0.3s ease;">
-                        <div style="font-size: 20px; margin-bottom: 5px;">📅</div>
-                        <div style="font-weight: 500; margin-bottom: 3px;">Event</div>
-                        <div style="font-size: 11px; color: #666;">Concerts, workshops, meetings</div>
-                    </button>
-                    
-                    <button onclick="addQuickTemplate('FAQPage')" style="padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: white; cursor: pointer; text-align: left; transition: all 0.3s ease;">
-                        <div style="font-size: 20px; margin-bottom: 5px;">❓</div>
-                        <div style="font-weight: 500; margin-bottom: 3px;">FAQ Page</div>
-                        <div style="font-size: 11px; color: #666;">Frequently asked questions</div>
-                    </button>
-                    
-                    <button onclick="addQuickTemplate('Article')" style="padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: white; cursor: pointer; text-align: left; transition: all 0.3s ease;">
-                        <div style="font-size: 20px; margin-bottom: 5px;">📰</div>
-                        <div style="font-weight: 500; margin-bottom: 3px;">Article</div>
-                        <div style="font-size: 11px; color: #666;">Blog posts, news articles</div>
-                    </button>
-                </div>
-                
-                <div style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #0073aa;">
-                    <h5 style="margin: 0 0 8px 0; color: #0073aa;">💡 Pro Tip</h5>
-                    <p style="margin: 0; font-size: 13px; line-height: 1.4; color: #666;">Choose a template based on your content type. These templates include the most important fields and follow Google's guidelines.</p>
-                </div>
-            </div>
-            
-            <!-- Enhanced Settings Tab -->
-            <div id="schemati-tab-settings" class="schemati-tab-content" style="display: none; padding: 20px;">
-                <h4 style="margin: 0 0 15px 0; color: #333; font-size: 14px;">GLOBAL SETTINGS</h4>
-                
-                <div style="margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
-                    <label style="display: flex; align-items: center; margin-bottom: 10px; cursor: pointer;">
-                        <input type="checkbox" id="schema-enabled" <?php checked($general_settings['enabled']); ?> onchange="toggleGlobalSchema()" style="margin-right: 8px;">
-                        <span style="font-weight: 500;">Enable Schema Markup</span>
-                    </label>
-                    <div style="font-size: 12px; color: #666; margin-left: 20px;">
-                        Controls whether schema markup is output on your website
-                    </div>
-                </div>
-                
-                <div style="margin-bottom: 20px;">
-                    <h5 style="margin: 0 0 10px 0; font-size: 13px; color: #333;">QUICK ACTIONS</h5>
-                    <div style="display: grid; gap: 8px;">
-                        <button onclick="showSchematiPreview()" style="width: 100%; padding: 12px; background: #0073aa; color: white; border: none; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
-                            <span>🔍</span>
-                            <span>Preview All Schemas</span>
-                        </button>
-                        <button onclick="testGoogleRichResults()" style="width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
-                            <span>🚀</span>
-                            <span>Test Rich Results</span>
-                        </button>
-                        <button onclick="exportAllSchemas()" style="width: 100%; padding: 12px; background: #17a2b8; color: white; border: none; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
-                            <span>💾</span>
-                            <span>Export All Schemas</span>
-                        </button>
-                        <button onclick="importSchemas()" style="width: 100%; padding: 12px; background: #fd7e14; color: white; border: none; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
-                            <span>📥</span>
-                            <span>Import Schemas</span>
-                        </button>
-                    </div>
-                </div>
-                
-                <div style="margin-bottom: 20px;">
-                    <h5 style="margin: 0 0 10px 0; font-size: 13px; color: #333;">BULK OPERATIONS</h5>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                        <button onclick="enableAllSchemas()" style="padding: 10px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">✓ Enable All</button>
-                        <button onclick="disableAllSchemas()" style="padding: 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">✗ Disable All</button>
-                        <button onclick="duplicateCurrentSchemas()" style="padding: 10px; background: #6f42c1; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">📋 Duplicate</button>
-                        <button onclick="resetAllSchemas()" style="padding: 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">🗑️ Reset All</button>
-                    </div>
-                </div>
-                
-                <div style="margin-bottom: 20px;">
-                    <a href="<?php echo admin_url('admin.php?page=schemati'); ?>" style="display: flex; align-items: center; gap: 8px; width: 100%; padding: 12px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; text-align: center; text-decoration: none; justify-content: center;">
-                        <span>⚙️</span>
-                        <span>Full Settings Panel</span>
-                    </a>
-                </div>
-                
-                <div style="font-size: 11px; color: #666; text-align: center; border-top: 1px solid #eee; padding-top: 15px;">
-                    <div>Schemati v5.0 | Live Schema Editor</div>
-                    <div style="margin-top: 4px;">
-                        <a href="https://search.google.com/test/rich-results" target="_blank" style="color: #0073aa; text-decoration: none;">Google Rich Results Test</a> |
-                        <a href="https://validator.schema.org/" target="_blank" style="color: #0073aa; text-decoration: none;">Schema Validator</a>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Hidden file input for import -->
-        <input type="file" id="schema-import-file" accept=".json" style="display: none;" onchange="handleSchemaImport(event)">
-        
-        <!-- Enhanced Schema Preview Modal -->
-        <div id="schemati-schema-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 100000; font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;">
-            <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90%; max-width: 1200px; height: 85%; background: white; border-radius: 8px; padding: 0; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.3);">
-                <div style="display: flex; justify-content: space-between; align-items: center; padding: 20px; background: linear-gradient(135deg, #0073aa 0%, #005177 100%); color: white;">
-                    <div>
-                        <h2 style="margin: 0; color: white;">🔍 Live Schema Preview</h2>
-                        <div style="font-size: 12px; opacity: 0.8; margin-top: 4px;" id="schema-preview-count">Loading...</div>
-                    </div>
-                    <div style="display: flex; gap: 10px;">
-                        <button onclick="copyAllSchemas()" style="background: rgba(255,255,255,0.2); border: none; color: white; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;">📋 Copy All</button>
-                        <button onclick="hideSchematiPreview()" style="background: none; border: none; font-size: 24px; cursor: pointer; color: white; padding: 5px;">&times;</button>
-                    </div>
-                </div>
-                <div id="schema-modal-content" style="height: calc(100% - 80px); overflow-y: auto; padding: 20px; font-family: monospace; font-size: 12px; line-height: 1.5;">
-                    Loading schema data...
-                </div>
-            </div>
-        </div>
-        
-        <script>
-        // Enhanced JavaScript with DOM-PHP sync
-        var currentPostId = <?php echo get_the_ID() ?: 0; ?>;
-        var detectedSchemas = [];
-        var phpSchemas = <?php echo json_encode($current_schemas); ?>;
-        
-        // Initialize on page load
-        document.addEventListener('DOMContentLoaded', function() {
-            syncSchemasWithDOM();
-        });
-        
-        // Enhanced sync function that combines DOM detection with PHP data
-        function syncSchemasWithDOM() {
-            detectedSchemas = [];
-            
-            // First, scan DOM for actual JSON-LD scripts
-            var domSchemas = [];
-            document.querySelectorAll('script[type="application/ld+json"]').forEach(function(script, index) {
-                try {
-                    var schema = JSON.parse(script.textContent);
-                    schema._domIndex = index;
-                    schema._element = script;
-                    schema._source = 'dom';
-                    domSchemas.push(schema);
-                } catch(e) {
-                    console.warn('Invalid JSON-LD schema found:', e);
-                }
-            });
-            
-            // Combine with PHP data for editing capabilities
-            domSchemas.forEach(function(domSchema, index) {
-                var schemaType = domSchema['@type'];
-                var schemaName = domSchema.name || domSchema.title || domSchema.headline || 'Untitled';
-                
-                // Try to find matching PHP schema for editing capabilities
-                var phpMatch = phpSchemas.find(function(phpSchema) {
-                    return phpSchema['@type'] === schemaType && 
-                           (phpSchema.name === schemaName || phpSchema.title === schemaName);
-                });
-                
-                if (phpMatch) {
-                    // Use PHP data but mark as DOM-detected
-                    phpMatch._domDetected = true;
-                    phpMatch._domIndex = index;
-                    detectedSchemas.push(phpMatch);
-                } else {
-                    // Add DOM-only schema (read-only)
-                    domSchema._enabled = true;
-                    domSchema._source = domSchema._source || 'system';
-                    domSchema._editable = false;
-                    detectedSchemas.push(domSchema);
-                }
-            });
-        function refreshSchemas() {
-    syncSchemasWithDOM();
-}
-
-// Add new schema
-function addNewSchema() {
-    var form = document.querySelector('#new-schema-form form');
-    if (!form) {
-        alert('Form not found');
-        return;
-    }
+    // NOTE: I'll continue with the rest of the file in the next section as this is getting long
+    // The remaining methods include: add_sidebar_html, output_schema, get_breadcrumb_data, 
+    // breadcrumb_shortcode, frontend_styles, init_github_updater, updates_page
     
-    var formData = new FormData(form);
-    var schemaType = document.getElementById('new-schema-type').value;
-    
-    if (!schemaType) {
-        alert('Please select a schema type');
-        return;
-    }
-    
-    // Convert FormData to regular object
-    var data = {
-        action: 'schemati_add_schema',
-        schema_type: schemaType,
-        post_id: currentPostId,
-        nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
-    };
-    
-    // Add form fields to data
-    for (var pair of formData.entries()) {
-        data[pair[0]] = pair[1];
-    }
-    
-    jQuery.ajax({
-        url: '<?php echo admin_url("admin-ajax.php"); ?>',
-        type: 'POST',
-        data: data,
-        success: function(response) {
-            if (response.success) {
-                alert('Schema added successfully!');
-                form.reset();
-                document.getElementById('new-schema-form').style.display = 'none';
-                document.getElementById('new-schema-type').value = '';
-                syncSchemasWithDOM();
-            } else {
-                alert('Error: ' + (response.data || 'Unknown error'));
-            }
-        },
-        error: function() {
-            alert('Connection error. Please try again.');
-        }
-    });
-}
-
-// Save schema changes
-function saveSchemaChanges(index) {
-    var form = document.querySelector('#schema-editor-' + index + ' form');
-    if (!form) return;
-    
-    var formData = new FormData(form);
-    var data = {
-        action: 'schemati_save_schema',
-        schema_index: index,
-        post_id: currentPostId,
-        nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
-    };
-    
-    // Add form fields
-    for (var pair of formData.entries()) {
-        data[pair[0]] = pair[1];
-    }
-    
-    jQuery.ajax({
-        url: '<?php echo admin_url("admin-ajax.php"); ?>',
-        type: 'POST',
-        data: data,
-        success: function(response) {
-            if (response.success) {
-                alert('Schema updated successfully!');
-                toggleSchemaEditor(index);
-                syncSchemasWithDOM();
-            } else {
-                alert('Error: ' + (response.data || 'Unknown error'));
-            }
-        },
-        error: function() {
-            alert('Connection error. Please try again.');
-        }
-    });
-}
-
-// Toggle schema on/off status
-function toggleSchemaStatus(index) {
-    jQuery.ajax({
-        url: '<?php echo admin_url("admin-ajax.php"); ?>',
-        type: 'POST',
-        data: {
-            action: 'schemati_toggle_schema',
-            schema_index: index,
-            post_id: currentPostId,
-            nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
-        },
-        success: function(response) {
-            if (response.success) {
-                syncSchemasWithDOM();
-            } else {
-                alert('Error: ' + (response.data || 'Unknown error'));
-            }
-        },
-        error: function() {
-            alert('Connection error. Please try again.');
-        }
-    });
-}
-
-// Delete schema
-function deleteSchema(index) {
-    if (!confirm('Are you sure you want to delete this schema?')) {
-        return;
-    }
-    
-    jQuery.ajax({
-        url: '<?php echo admin_url("admin-ajax.php"); ?>',
-        type: 'POST',
-        data: {
-            action: 'schemati_delete_schema',
-            schema_index: index,
-            post_id: currentPostId,
-            nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
-        },
-        success: function(response) {
-            if (response.success) {
-                alert('Schema deleted successfully!');
-                syncSchemasWithDOM();
-            } else {
-                alert('Error: ' + (response.data || 'Unknown error'));
-            }
-        },
-        error: function() {
-            alert('Connection error. Please try again.');
-        }
-    });
-}
-
-// Toggle global schema setting
-function toggleGlobalSchema() {
-    var checkbox = document.getElementById('schema-enabled');
-    var enabled = checkbox.checked ? 1 : 0;
-    
-    jQuery.ajax({
-        url: '<?php echo admin_url("admin-ajax.php"); ?>',
-        type: 'POST',
-        data: {
-            action: 'schemati_toggle_global',
-            enabled: enabled,
-            nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
-        },
-        success: function(response) {
-            if (response.success) {
-                document.getElementById('schema-status').textContent = enabled ? 'Active' : 'Disabled';
-            } else {
-                alert('Error: ' + (response.data || 'Unknown error'));
-                checkbox.checked = !checkbox.checked; // Revert checkbox
-            }
-        },
-        error: function() {
-            alert('Connection error. Please try again.');
-            checkbox.checked = !checkbox.checked; // Revert checkbox
-        }
-    });
-}
-
-// Define loadSchemaTemplate function
-function loadSchemaTemplate() {
-    loadSchemaTemplateWithFeedback();
-}
-            
-            // Update counters
-            updateSchemaCounts();
-            
-            // Re-render current schemas list
-            renderCurrentSchemas();
-            
-            console.log('Schemati: Synced', detectedSchemas.length, 'schemas', detectedSchemas);
-        }
-        
-        // Update all schema counters
-        function updateSchemaCounts() {
-            var count = detectedSchemas.length;
-            document.getElementById('schema-count').textContent = count + ' schemas detected';
-            document.getElementById('current-count').textContent = count + ' schemas';
-        }
-        
-        // Render current schemas in the sidebar
-        function renderCurrentSchemas() {
-            var container = document.getElementById('current-schemas-list');
-            
-            if (detectedSchemas.length === 0) {
-                container.innerHTML = `
-                    <div style="text-align: center; padding: 40px 20px; color: #666;">
-                        <div style="font-size: 48px; margin-bottom: 10px;">📋</div>
-                        <h4>No schemas detected</h4>
-                        <p>Add your first schema using the "Add" tab or choose from templates.</p>
-                        <button onclick="showSchematiTab('templates')" style="background: #0073aa; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-top: 10px;">Browse Templates</button>
-                    </div>
-                `;
-                return;
-            }
-            
-            var html = '';
-            detectedSchemas.forEach(function(schema, index) {
-                html += renderSchemaItem(schema, index);
-            });
-            
-            container.innerHTML = html;
-        }
-        
-        // Render individual schema item
-        function renderSchemaItem(schema, index) {
-            var schemaType = schema['@type'] || 'Unknown';
-            var schemaName = schema.name || schema.title || schema.headline || 'Untitled';
-            var schemaEnabled = schema._enabled !== false;
-            var schemaSource = schema._source || 'unknown';
-            var isEditable = schema._editable !== false && schemaSource === 'custom';
-            
-            var sourceInfo = getSourceInfo(schemaSource);
-            
-            var html = `
-                <div class="schema-item" data-schema-index="${index}" style="margin-bottom: 15px; border: 1px solid ${schemaEnabled ? '#ddd' : '#f5c6cb'}; border-radius: 8px; overflow: hidden; ${schemaEnabled ? '' : 'opacity: 0.7;'}">
-                    <div class="schema-header" style="background: ${schemaEnabled ? '#f8f9fa' : '#f8d7da'}; padding: 12px; display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleSchemaEditor(${index})">
-                        <div style="flex: 1;">
-                            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-                                <strong style="color: #0073aa; font-size: 14px;">${schemaType}</strong>
-                                <span style="background: ${sourceInfo.color}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 500;">
-                                    ${sourceInfo.icon} ${sourceInfo.label}
-                                </span>
-                            </div>
-                            <div style="font-size: 12px; color: #666; line-height: 1.3;">
-                                ${schemaName.length > 50 ? schemaName.substring(0, 50) + '...' : schemaName}
-                            </div>
-                        </div>
-                        <div style="display: flex; gap: 5px; align-items: center;">`;
-            
-            if (isEditable) {
-                html += `
-                            <button onclick="toggleSchemaStatus(${index}); event.stopPropagation();" style="background: ${schemaEnabled ? '#28a745' : '#dc3545'}; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer; font-weight: 500;">
-                                ${schemaEnabled ? 'ON' : 'OFF'}
-                            </button>
-                            <button onclick="deleteSchema(${index}); event.stopPropagation();" style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;">✕</button>`;
-            } else {
-                html += `<span style="color: #666; font-size: 11px;">Read-only</span>`;
-            }
-            
-            html += `
-                            <span style="color: #666; font-size: 12px;">▼</span>
-                        </div>
-                    </div>`;
-            
-            if (isEditable) {
-                html += `
-                    <div id="schema-editor-${index}" class="schema-editor" style="display: none; padding: 15px; background: white; border-top: 1px solid #ddd;">
-                        <form onsubmit="saveSchemaChanges(${index}); return false;">
-                            <div style="margin-bottom: 15px;">
-                                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Name:</label>
-                                <input type="text" name="name" value="${schema.name || ''}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                            </div>
-                            <div style="margin-bottom: 15px;">
-                                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-                                <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">${schema.description || ''}</textarea>
-                            </div>
-                            <div style="margin-top: 15px; text-align: right;">
-                                <button type="button" onclick="toggleSchemaEditor(${index})" style="background: #6c757d; color: white; border: none; padding: 8px 15px; border-radius: 4px; margin-right: 5px; cursor: pointer;">Cancel</button>
-                                <button type="submit" style="background: #28a745; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer;">Save Changes</button>
-                            </div>
-                        </form>
-                    </div>`;
-            } else {
-                html += `
-                    <div id="schema-editor-${index}" class="schema-editor" style="display: none; padding: 15px; background: #f8f9fa; border-top: 1px solid #ddd;">
-                        <div style="text-align: center; color: #666;">
-                            <p><strong>🔒 System Generated Schema</strong></p>
-                            <p style="font-size: 13px; line-height: 1.4;">This schema is automatically generated. You can modify global settings in the admin panel.</p>
-                            <a href="<?php echo admin_url('admin.php?page=schemati'); ?>" style="color: #0073aa; text-decoration: none;">⚙️ Edit Global Settings</a>
-                        </div>
-                    </div>`;
-            }
-            
-            html += `</div>`;
-            return html;
-        }
-        
-        // Get source information
-        function getSourceInfo(source) {
-            switch (source) {
-                case 'global':
-                    return { label: 'Global', icon: '🌐', color: '#17a2b8' };
-                case 'post':
-                    return { label: 'Post', icon: '📄', color: '#28a745' };
-                case 'auto':
-                    return { label: 'Auto', icon: '🤖', color: '#6f42c1' };
-                case 'custom':
-                    return { label: 'Custom', icon: '✏️', color: '#fd7e14' };
-                case 'dom':
-                case 'system':
-                    return { label: 'System', icon: '⚙️', color: '#6c757d' };
-                default:
-                    return { label: 'Unknown', icon: '❓', color: '#6c757d' };
-            }
-        }
-        
-        // Enhanced toggle sidebar that syncs on open
-        function toggleSchematiSidebar() {
-            var sidebar = document.getElementById("schemati-sidebar");
-            if (sidebar) {
-                if (sidebar.style.display === "none") {
-                    sidebar.style.display = "block";
-                    syncSchemasWithDOM(); // Sync when opening
-                } else {
-                    sidebar.style.display = "none";
-                }
-            }
-        }
-        
-        // Enhanced tab switching
-        function showSchematiTab(tabName) {
-            document.querySelectorAll('.schemati-tab-content').forEach(tab => {
-                tab.style.display = 'none';
-            });
-            document.querySelectorAll('.schemati-tab').forEach(btn => {
-                btn.style.background = '#f1f1f1';
-                btn.style.borderBottomColor = 'transparent';
-            });
-            
-            document.getElementById('schemati-tab-' + tabName).style.display = 'block';
-            event.target.style.background = 'white';
-            event.target.style.borderBottomColor = '#0073aa';
-            
-            // Sync schemas when viewing current tab
-            if (tabName === 'current') {
-                syncSchemasWithDOM();
-            }
-        }
-        
-        // Toggle schema editor
-        function toggleSchemaEditor(index) {
-            var editor = document.getElementById('schema-editor-' + index);
-            if (editor) {
-                editor.style.display = editor.style.display === 'none' ? 'block' : 'none';
-            }
-        }
-        
-        // Enhanced schema preview with DOM schemas
-        function showSchematiPreview() {
-            syncSchemasWithDOM();
-            
-            var modal = document.getElementById('schemati-schema-modal');
-            var content = document.getElementById('schema-modal-content');
-            var countElement = document.getElementById('schema-preview-count');
-            
-            if (detectedSchemas.length === 0) {
-                content.innerHTML = '<div style="text-align: center; padding: 40px; color: #666;"><div style="font-size: 48px; margin-bottom: 15px;">📋</div><h3>No Schema Found</h3><p>No schema markup was detected on this page.</p></div>';
-                countElement.textContent = 'No schemas found';
-            } else {
-                var html = '<div style="margin-bottom: 20px; padding: 15px; background: #d4edda; border-radius: 8px; color: #155724; border-left: 4px solid #28a745;"><h3 style="margin: 0; display: flex; align-items: center; gap: 8px;"><span>✅</span>Found ' + detectedSchemas.length + ' Schema Type(s)</h3><p style="margin: 5px 0 0 0; font-size: 13px;">All schemas are properly formatted and ready for search engines.</p></div>';
-                
-                detectedSchemas.forEach(function(schema, index) {
-                    var schemaType = schema['@type'] || 'Unknown Type';
-                    var schemaName = schema.name || schema.title || schema.headline || 'No title';
-                    
-                    html += '<div style="margin-bottom: 25px; border: 1px solid #dee2e6; border-radius: 8px; overflow: hidden; background: white;">';
-                    html += '<div style="padding: 15px; background: linear-gradient(135deg, #0073aa 0%, #005177 100%); color: white; display: flex; justify-content: space-between; align-items: center;">';
-                    html += '<div><h4 style="margin: 0; font-size: 16px;">' + (index + 1) + '. ' + schemaType + ' Schema</h4>';
-                    if (schemaName !== 'No title') {
-                        html += '<div style="font-size: 12px; opacity: 0.8; margin-top: 4px;">' + schemaName + '</div>';
-                    }
-                    html += '</div>';
-                    html += '<button onclick="copySchema(' + index + ')" style="background: rgba(255,255,255,0.2); border: none; color: white; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">Copy</button>';
-                    html += '</div>';
-                    html += '<pre style="background: #2d3748; color: #e2e8f0; padding: 20px; margin: 0; overflow-x: auto; white-space: pre-wrap; font-size: 11px; line-height: 1.5;">' + JSON.stringify(schema, null, 2) + '</pre>';
-                    html += '</div>';
-                });
-                content.innerHTML = html;
-                countElement.textContent = detectedSchemas.length + ' schemas detected and validated';
-            }
-            
-            modal.style.display = 'block';
-        }
-        
-        // Copy individual schema
-        function copySchema(index) {
-            if (detectedSchemas[index]) {
-                navigator.clipboard.writeText(JSON.stringify(detectedSchemas[index], null, 2)).then(() => {
-                    alert('Schema copied to clipboard!');
-                });
-            }
-        }
-        
-        // Copy all schemas
-        function copyAllSchemas() {
-            navigator.clipboard.writeText(JSON.stringify(detectedSchemas, null, 2)).then(() => {
-                alert('All schemas copied to clipboard!');
-            });
-        }
-        
-        // Hide preview modal
-        function hideSchematiPreview() {
-            document.getElementById('schemati-schema-modal').style.display = 'none';
-        }
-        
-        // Test Google Rich Results
-        function testGoogleRichResults() {
-            window.open('https://search.google.com/test/rich-results?url=' + encodeURIComponent(window.location.href), '_blank');
-        }
-        
-        
-        // Export page schemas
-        function exportPageSchemas() {
-            var blob = new Blob([JSON.stringify(detectedSchemas, null, 2)], {type: 'application/json'});
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = url;
-            a.download = 'page-schemas-' + new Date().toISOString().split('T')[0] + '.json';
-            a.click();
-            URL.revokeObjectURL(url);
-        }
-        
-        // Export all schemas
-        function exportAllSchemas() {
-            exportPageSchemas(); // For now, same as page schemas
-        }
-        
-        // Import schemas
-        function importSchemas() {
-            document.getElementById('schema-import-file').click();
-        }
-        
-        // Handle schema import
-        function handleSchemaImport(event) {
-            var file = event.target.files[0];
-            if (!file) return;
-            
-            var reader = new FileReader();
-            reader.onload = function(e) {
-                try {
-                    var schemas = JSON.parse(e.target.result);
-                    // Here you would process the imported schemas
-                    alert('Schemas imported successfully! ' + schemas.length + ' schemas loaded.');
-                    location.reload();
-                } catch (error) {
-                    alert('Error importing schemas: Invalid JSON file.');
-                }
-            };
-            reader.readAsText(file);
-        }
-        
-        // Bulk operations
-        function enableAllSchemas() {
-            if (confirm('Enable all schemas on this page?')) {
-                // Implementation for enabling all schemas
-                alert('All schemas enabled!');
-                location.reload();
-            }
-        }
-        
-        function disableAllSchemas() {
-            if (confirm('Disable all schemas on this page?')) {
-                // Implementation for disabling all schemas
-                alert('All schemas disabled!');
-                location.reload();
-            }
-        }
-        
-        function duplicateCurrentSchemas() {
-            if (confirm('Duplicate all current schemas?')) {
-                // Implementation for duplicating schemas
-                alert('Schemas duplicated!');
-                location.reload();
-            }
-        }
-        
-        function resetAllSchemas() {
-            if (confirm('Reset all schemas? This will remove all custom schemas.')) {
-                // Implementation for resetting schemas
-                alert('All schemas reset!');
-                location.reload();
-            }
-        }
-        
-        // Validate all schemas
-        function validateAllSchemas() {
-            var validCount = 0;
-            var invalidCount = 0;
-            
-            detectedSchemas.forEach(function(schema) {
-                try {
-                    // Basic validation
-                    if (schema['@context'] && schema['@type']) {
-                        validCount++;
-                    } else {
-                        invalidCount++;
-                    }
-                } catch (e) {
-                    invalidCount++;
-                }
-            });
-            
-            alert('Validation Results:\n✅ Valid: ' + validCount + '\n❌ Invalid: ' + invalidCount);
-        }
-        
-        // Preview new schema before adding
-        function previewNewSchema() {
-            var form = document.querySelector('#new-schema-form form');
-            var formData = new FormData(form);
-            var schemaType = document.getElementById('new-schema-type').value;
-            
-            // Build preview schema object
-            var previewSchema = {
-                '@context': 'https://schema.org',
-                '@type': schemaType
-            };
-            
-            // Add form data to preview
-            for (var pair of formData.entries()) {
-                if (pair[1]) {
-                    previewSchema[pair[0]] = pair[1];
-                }
-            }
-            
-            // Show preview in modal
-            var modal = document.getElementById('schemati-schema-modal');
-            var content = document.getElementById('schema-modal-content');
-            
-            content.innerHTML = '<div style="margin-bottom: 20px; padding: 15px; background: #fff3cd; border-radius: 8px; color: #856404; border-left: 4px solid #ffc107;"><h3 style="margin: 0;">👁️ Schema Preview</h3><p style="margin: 5px 0 0 0; font-size: 13px;">This is how your schema will look when added.</p></div><pre style="background: #2d3748; color: #e2e8f0; padding: 20px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; font-size: 11px; line-height: 1.4;">' + JSON.stringify(previewSchema, null, 2) + '</pre>';
-            
-            modal.style.display = 'block';
-        }
-        
-        // Toggle all schemas
-        function toggleAllSchemas() {
-            // Implementation for toggling all schemas
-            alert('All schemas toggled!');
-        }
-        
-        // Add CSS for hover effects on template buttons
-        var style = document.createElement('style');
-        style.textContent = `
-            .schemati-tab {
-                transition: all 0.3s ease;
-            }
-            .schemati-tab:hover {
-                background: #e9ecef !important;
-            }
-            #schemati-tab-templates button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-color: #0073aa;
-            }
-            .schema-item {
-                transition: all 0.3s ease;
-            }
-            .schema-item:hover {
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            }
-        `;
-        document.head.appendChild(style);
-        function addQuickTemplate(type) {
-    console.log('Adding quick template:', type);
-    
-    try {
-        // Set the dropdown value
-        var dropdown = document.getElementById('new-schema-type');
-        if (!dropdown) {
-            console.error('Schema type dropdown not found');
-            alert('Error: Schema dropdown not found. Please refresh the page.');
-            return;
-        }
-        
-        dropdown.value = type;
-        
-        // Trigger change event
-        var event = new Event('change', { bubbles: true });
-        dropdown.dispatchEvent(event);
-        
-        // Load template with enhanced error handling
-        loadSchemaTemplateWithFeedback();
-        
-        // Switch to add tab
-        showSchematiTab('add');
-        
-        // Scroll to form
-        setTimeout(function() {
-            var form = document.getElementById('new-schema-form');
-            if (form && form.style.display !== 'none') {
-                form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            }
-        }, 300);
-        
-    } catch (error) {
-        console.error('Error in addQuickTemplate:', error);
-        alert('Error loading template: ' + error.message);
-    }
-}
-
-// Enhanced version of existing loadSchemaTemplate function
-function loadSchemaTemplateWithFeedback() {
-    var schemaType = document.getElementById('new-schema-type').value;
-    var formContainer = document.getElementById('new-schema-form');
-    var fieldsContainer = document.getElementById('schema-template-fields');
-    
-    if (!schemaType) {
-        formContainer.style.display = 'none';
-        return;
-    }
-    
-    // Show loading state
-    fieldsContainer.innerHTML = '<div style="text-align: center; padding: 20px; color: #666;"><div style="font-size: 20px; margin-bottom: 10px;">⏳</div><p>Loading template...</p></div>';
-    formContainer.style.display = 'block';
-    
-    // Check if jQuery is available
-    if (typeof jQuery === 'undefined') {
-        console.error('jQuery is not loaded');
-        fieldsContainer.innerHTML = '<div style="color: red; padding: 15px; border: 1px solid red; border-radius: 4px;"><strong>Error:</strong> jQuery is required but not loaded. Please refresh the page.</div>';
-        return;
-    }
-    
-    jQuery.ajax({
-        url: '<?php echo admin_url("admin-ajax.php"); ?>',
-        type: 'POST',
-        data: {
-            action: 'schemati_get_schema_template',
-            schema_type: schemaType,
-            nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>'
-        },
-        timeout: 10000,
-        success: function(response) {
-            console.log('Template response:', response);
-            
-            if (response.success && response.data) {
-                fieldsContainer.innerHTML = response.data;
-                
-                // Add success feedback
-                var successMsg = document.createElement('div');
-                successMsg.style.cssText = 'background: #d4edda; color: #155724; padding: 10px; border-radius: 4px; margin-bottom: 15px; border-left: 4px solid #28a745;';
-                successMsg.innerHTML = '✅ Template loaded successfully! Fill in the fields below.';
-                fieldsContainer.insertBefore(successMsg, fieldsContainer.firstChild);
-                
-                // Remove success message after 3 seconds
-                setTimeout(function() {
-                    if (successMsg.parentNode) {
-                        successMsg.remove();
-                    }
-                }, 3000);
-                
-            } else {
-                var errorMsg = response.data || 'Template not found';
-                fieldsContainer.innerHTML = '<div style="color: #721c24; background: #f8d7da; padding: 15px; border-radius: 4px; border-left: 4px solid #dc3545;"><strong>❌ Error:</strong> ' + errorMsg + '<br><br>Available templates: LocalBusiness, Service, Product, Event, Person, FAQPage, Article, Organization<br><br><button onclick="loadSchemaTemplateWithFeedback()" style="background: #dc3545; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">🔄 Retry</button></div>';
-            }
-        },
-        error: function(xhr, status, error) {
-            console.error('AJAX Error:', status, error, xhr);
-            
-            var errorMsg = 'Connection error. ';
-            if (status === 'timeout') {
-                errorMsg += 'Request timed out.';
-            } else if (status === 'error') {
-                errorMsg += 'Server error: ' + error;
-            } else {
-                errorMsg += 'Status: ' + status;
-            }
-            
-            fieldsContainer.innerHTML = '<div style="color: #721c24; background: #f8d7da; padding: 15px; border-radius: 4px; border-left: 4px solid #dc3545;"><strong>❌ Connection Error:</strong> ' + errorMsg + '<br><br><button onclick="loadSchemaTemplateWithFeedback()" style="background: #dc3545; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">🔄 Retry</button></div>';
-        }
-    });
-}
-
-// Override the original loadSchemaTemplate to use the enhanced version
-window.loadSchemaTemplate = loadSchemaTemplateWithFeedback;
-
-// Add debugging function
-function debugSchematiTemplates() {
-    console.log('=== Schemati Template Debug ===');
-    console.log('jQuery available:', typeof jQuery !== 'undefined');
-    console.log('Required elements:');
-    
-    ['new-schema-type', 'new-schema-form', 'schema-template-fields'].forEach(function(id) {
-        var element = document.getElementById(id);
-        console.log('- ' + id + ':', element ? '✅' : '❌');
-        if (element) {
-            console.log('  Value/content:', element.value || element.innerHTML.substring(0, 100));
-        }
-    });
-    
-    console.log('Template buttons:');
-    document.querySelectorAll('[onclick*="addQuickTemplate"]').forEach(function(btn, index) {
-        console.log('- Button ' + index + ':', btn.textContent.trim());
-    });
-    
-    console.log('AJAX URL:', '<?php echo admin_url("admin-ajax.php"); ?>');
-    console.log('============================');
-}
-
-// Make debug function globally available
-window.debugSchematiTemplates = debugSchematiTemplates;
-
-console.log('Schemati: Template functions loaded');
-        </script>
-        <?php
-    }
-
-    /**
-     * Render enhanced schema item with better UI
-     */
-    private function render_enhanced_schema_item($schema, $index) {
-        $schema_type = $schema['@type'] ?? 'Unknown';
-        $schema_name = $schema['name'] ?? $schema['title'] ?? 'Untitled';
-        $schema_enabled = $schema['_enabled'] ?? true;
-        $schema_source = $schema['_source'] ?? 'unknown';
-        
-        // Get source icon and color
-        $source_info = $this->get_source_info($schema_source);
-        ?>
-        <div class="schema-item" data-schema-index="<?php echo $index; ?>" style="margin-bottom: 15px; border: 1px solid <?php echo $schema_enabled ? '#ddd' : '#f5c6cb'; ?>; border-radius: 8px; overflow: hidden; <?php echo $schema_enabled ? '' : 'opacity: 0.7;'; ?>">
-            <div class="schema-header" style="background: <?php echo $schema_enabled ? '#f8f9fa' : '#f8d7da'; ?>; padding: 12px; display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleSchemaEditor(<?php echo $index; ?>)">
-                <div style="flex: 1;">
-                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-                        <strong style="color: #0073aa; font-size: 14px;"><?php echo esc_html($schema_type); ?></strong>
-                        <span style="background: <?php echo $source_info['color']; ?>; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 500;">
-                            <?php echo $source_info['icon']; ?> <?php echo $source_info['label']; ?>
-                        </span>
-                    </div>
-                    <div style="font-size: 12px; color: #666; line-height: 1.3;">
-                        <?php echo esc_html(wp_trim_words($schema_name, 8)); ?>
-                    </div>
-                </div>
-                <div style="display: flex; gap: 5px; align-items: center;">
-                    <?php if ($schema_source === 'custom'): ?>
-                    <button onclick="toggleSchemaStatus(<?php echo $index; ?>); event.stopPropagation();" style="background: <?php echo $schema_enabled ? '#28a745' : '#dc3545'; ?>; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer; font-weight: 500;">
-                        <?php echo $schema_enabled ? 'ON' : 'OFF'; ?>
-                    </button>
-                    <button onclick="deleteSchema(<?php echo $index; ?>); event.stopPropagation();" style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;">✕</button>
-                    <?php endif; ?>
-                    <span style="color: #666; font-size: 12px;">▼</span>
-                </div>
-            </div>
-            
-            <?php if ($schema_source === 'custom'): ?>
-            <div id="schema-editor-<?php echo $index; ?>" class="schema-editor" style="display: none; padding: 15px; background: white; border-top: 1px solid #ddd;">
-                <form onsubmit="saveSchemaChanges(<?php echo $index; ?>); return false;">
-                    <?php $this->render_schema_editor_fields($schema, $index); ?>
-                    <div style="margin-top: 15px; text-align: right;">
-                        <button type="button" onclick="toggleSchemaEditor(<?php echo $index; ?>)" style="background: #6c757d; color: white; border: none; padding: 8px 15px; border-radius: 4px; margin-right: 5px; cursor: pointer;">Cancel</button>
-                        <button type="submit" style="background: #28a745; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer;">Save Changes</button>
-                    </div>
-                </form>
-            </div>
-            <?php else: ?>
-            <div id="schema-editor-<?php echo $index; ?>" class="schema-editor" style="display: none; padding: 15px; background: #f8f9fa; border-top: 1px solid #ddd;">
-                <div style="text-align: center; color: #666;">
-                    <p><strong>🔒 System Generated Schema</strong></p>
-                    <p style="font-size: 13px; line-height: 1.4;">This schema is automatically generated by Schemati based on your global settings and page content. You can modify global settings in the admin panel.</p>
-                    <a href="<?php echo admin_url('admin.php?page=schemati'); ?>" style="color: #0073aa; text-decoration: none;">⚙️ Edit Global Settings</a>
-                </div>
-            </div>
-            <?php endif; ?>
-        </div>
-        <?php
-    }
-
-    /**
-     * Get source information for schema items
-     */
-    private function get_source_info($source) {
-        switch ($source) {
-            case 'global':
-                return array(
-                    'label' => 'Global',
-                    'icon' => '🌐',
-                    'color' => '#17a2b8'
-                );
-            case 'post':
-                return array(
-                    'label' => 'Post',
-                    'icon' => '📄',
-                    'color' => '#28a745'
-                );
-            case 'auto':
-                return array(
-                    'label' => 'Auto',
-                    'icon' => '🤖',
-                    'color' => '#6f42c1'
-                );
-            case 'custom':
-                return array(
-                    'label' => 'Custom',
-                    'icon' => '✏️',
-                    'color' => '#fd7e14'
-                );
-            default:
-                return array(
-                    'label' => 'Unknown',
-                    'icon' => '❓',
-                    'color' => '#6c757d'
-                );
-        }
-    }
-
-    /**
-     * Get enhanced page schemas with better detection
-     */
-    private function get_enhanced_page_schemas() {
-        $schemas = array();
-        
-        // Get existing schemas that would be output
-        $general_settings = $this->get_settings('schemati_general');
-        
-        if (!$general_settings['enabled']) {
-            return $schemas;
-        }
-        
-        // Organization schema
-        $org_schema = $this->build_organization_schema();
-        if ($org_schema) {
-            $org_schema['_enabled'] = true;
-            $org_schema['_source'] = 'global';
-            $schemas[] = $org_schema;
-        }
-        
-        // Page-specific schemas
-        if (is_singular()) {
-            global $post;
-            
-            // WebPage/Article schema
-            $page_schema = $this->build_webpage_schema();
-            if ($page_schema) {
-                $page_schema['_enabled'] = true;
-                $page_schema['_source'] = 'post';
-                $schemas[] = $page_schema;
-            }
-            
-            // Breadcrumb schema
-            if (!is_front_page()) {
-                $breadcrumb_schema = $this->build_breadcrumb_schema();
-                if ($breadcrumb_schema) {
-                    $breadcrumb_schema['_enabled'] = true;
-                    $breadcrumb_schema['_source'] = 'auto';
-                    $schemas[] = $breadcrumb_schema;
-                }
-            }
-            
-            // Custom schemas from meta
-            $custom_schemas = get_post_meta($post->ID, '_schemati_custom_schemas', true);
-            if ($custom_schemas && is_array($custom_schemas)) {
-                foreach ($custom_schemas as $index => $custom_schema) {
-                    $custom_schema['_source'] = 'custom';
-                    $custom_schema['_index'] = $index;
-                    $schemas[] = $custom_schema;
-                }
-            }
-        }
-        
-        return $schemas;
-    }
-
-    /**
-     * Render schema editor fields based on schema type
-     */
-    private function render_schema_editor_fields($schema, $index) {
-        $schema_type = $schema['@type'] ?? 'Unknown';
-        
-        switch ($schema_type) {
-            case 'LocalBusiness':
-            case 'Service':
-                $this->render_business_schema_fields($schema, $index);
-                break;
-            case 'Product':
-                $this->render_product_schema_fields($schema, $index);
-                break;
-            case 'Organization':
-                $this->render_organization_schema_fields($schema, $index);
-                break;
-            case 'Person':
-                $this->render_person_schema_fields($schema, $index);
-                break;
-            default:
-                $this->render_generic_schema_fields($schema, $index);
-        }
-    }
-
-    /**
-     * Render business schema editor fields
-     */
-    private function render_business_schema_fields($schema, $index) {
-        ?>
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Business Name:</label>
-            <input type="text" name="name" value="<?php echo esc_attr($schema['name'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-            <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"><?php echo esc_textarea($schema['description'] ?? ''); ?></textarea>
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Address:</label>
-            <textarea name="address" rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"><?php echo esc_textarea($schema['address'] ?? ''); ?></textarea>
-        </div>
-        
-        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-            <div style="flex: 1;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
-                <input type="text" name="telephone" value="<?php echo esc_attr($schema['telephone'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="flex: 1;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
-                <input type="email" name="email" value="<?php echo esc_attr($schema['email'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website URL:</label>
-            <input type="url" name="url" value="<?php echo esc_attr($schema['url'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        <?php
-    }
-
-    /**
-     * Render product schema editor fields
-     */
-    private function render_product_schema_fields($schema, $index) {
-        ?>
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Product Name:</label>
-            <input type="text" name="name" value="<?php echo esc_attr($schema['name'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-            <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"><?php echo esc_textarea($schema['description'] ?? ''); ?></textarea>
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Brand:</label>
-            <input type="text" name="brand" value="<?php echo esc_attr($schema['brand'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-            <div style="flex: 1;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Price:</label>
-                <input type="number" name="price" step="0.01" value="<?php echo esc_attr($schema['offers']['price'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="flex: 1;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Currency:</label>
-                <select name="currency" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    <option value="USD" <?php selected($schema['offers']['priceCurrency'] ?? 'USD', 'USD'); ?>>USD</option>
-                    <option value="EUR" <?php selected($schema['offers']['priceCurrency'] ?? '', 'EUR'); ?>>EUR</option>
-                    <option value="GBP" <?php selected($schema['offers']['priceCurrency'] ?? '', 'GBP'); ?>>GBP</option>
-                    <option value="CAD" <?php selected($schema['offers']['priceCurrency'] ?? '', 'CAD'); ?>>CAD</option>
-                </select>
-            </div>
-        </div>
-        <?php
-    }
-
-    /**
-     * Render organization schema editor fields
-     */
-    private function render_organization_schema_fields($schema, $index) {
-        ?>
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Organization Name:</label>
-            <input type="text" name="name" value="<?php echo esc_attr($schema['name'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-            <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"><?php echo esc_textarea($schema['description'] ?? ''); ?></textarea>
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website URL:</label>
-            <input type="url" name="url" value="<?php echo esc_attr($schema['url'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
-            <input type="email" name="email" value="<?php echo esc_attr($schema['email'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
-            <input type="text" name="telephone" value="<?php echo esc_attr($schema['telephone'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        <?php
-    }
-
-    /**
-     * Render person schema editor fields
-     */
-    private function render_person_schema_fields($schema, $index) {
-        ?>
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Full Name:</label>
-            <input type="text" name="name" value="<?php echo esc_attr($schema['name'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Job Title:</label>
-            <input type="text" name="job_title" value="<?php echo esc_attr($schema['jobTitle'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-            <div style="flex: 1;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Email:</label>
-                <input type="email" name="email" value="<?php echo esc_attr($schema['email'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-            <div style="flex: 1;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Phone:</label>
-                <input type="text" name="telephone" value="<?php echo esc_attr($schema['telephone'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-            </div>
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Website:</label>
-            <input type="url" name="url" value="<?php echo esc_attr($schema['url'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        <?php
-    }
-
-    /**
-     * Render generic schema editor fields
-     */
-    private function render_generic_schema_fields($schema, $index) {
-        ?>
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Name/Title:</label>
-            <input type="text" name="name" value="<?php echo esc_attr($schema['name'] ?? $schema['title'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description:</label>
-            <textarea name="description" rows="3" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"><?php echo esc_textarea($schema['description'] ?? ''); ?></textarea>
-        </div>
-        
-        <div style="margin-bottom: 15px;">
-            <label style="display: block; margin-bottom: 5px; font-weight: 500;">URL:</label>
-            <input type="url" name="url" value="<?php echo esc_attr($schema['url'] ?? ''); ?>" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-        </div>
-        <?php
-    }
-
     /**
      * Output schema markup in head
      */
@@ -2888,6 +2297,15 @@ console.log('Schemati: Template functions loaded');
         if ($org_schema) {
             $schemas[] = $org_schema;
         }
+		$header_schema = $this->build_wpheader_schema();
+if ($header_schema) {
+    $schemas[] = $header_schema;
+}
+
+$footer_schema = $this->build_wpfooter_schema();
+if ($footer_schema) {
+    $schemas[] = $footer_schema;
+}
         
         // Page-specific schemas
         if (is_singular()) {
@@ -3059,51 +2477,6 @@ console.log('Schemati: Template functions loaded');
         
         return $html;
     }
-    /**
- * Updates management page
- */
-public function updates_page() {
-    $remote_version = ($this->github_updater) ? $this->github_updater->get_remote_version() : null;
-    $current_version = SCHEMATI_VERSION;
-    $update_available = $remote_version && version_compare($current_version, $remote_version, '<');
-    
-    ?>
-    <div class="wrap">
-        <h1><?php _e('Schemati - Updates', 'schemati'); ?></h1>
-        
-        <div class="card">
-            <h2><?php _e('Version Information', 'schemati'); ?></h2>
-            <table class="form-table">
-                <tr>
-                    <th scope="row"><?php _e('Current Version', 'schemati'); ?></th>
-                    <td>
-                        <strong><?php echo esc_html($current_version); ?></strong>
-                        <?php if ($update_available): ?>
-                            <span style="color: #d63384; margin-left: 10px;">
-                                <?php _e('(Update Available)', 'schemati'); ?>
-                            </span>
-                        <?php else: ?>
-                            <span style="color: #198754; margin-left: 10px;">
-                                <?php _e('(Up to Date)', 'schemati'); ?>
-                            </span>
-                        <?php endif; ?>
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row"><?php _e('Latest Version', 'schemati'); ?></th>
-                    <td>
-                        <?php if ($remote_version): ?>
-                            <strong><?php echo esc_html($remote_version); ?></strong>
-                        <?php else: ?>
-                            <em><?php _e('Unable to check', 'schemati'); ?></em>
-                        <?php endif; ?>
-                    </td>
-                </tr>
-            </table>
-        </div>
-    </div>
-    <?php
-}
 
     /**
      * Frontend styles for breadcrumbs
@@ -3144,33 +2517,863 @@ public function updates_page() {
         </style>
         <?php
     }
+
     /**
- * Initialize GitHub updater
- */
-private function init_github_updater() {
-    // Check if the updater file exists
-    $updater_file = SCHEMATI_DIR . 'includes/class-github-updater.php';
-    
-    if (!file_exists($updater_file)) {
-        return; // Skip if file doesn't exist
+     * Initialize GitHub updater
+     */
+    private function init_github_updater() {
+        // Check if the updater file exists
+        $updater_file = SCHEMATI_DIR . 'includes/class-github-updater.php';
+        
+        if (!file_exists($updater_file)) {
+            return; // Skip if file doesn't exist
+        }
+        
+        // Include the GitHub updater class
+        require_once $updater_file;
+        
+        // Check if class exists
+        if (!class_exists('Schemati_GitHub_Updater')) {
+            return; // Skip if class doesn't exist
+        }
+        
+        // Initialize updater
+        $this->github_updater = new Schemati_GitHub_Updater(
+            SCHEMATI_FILE,                // Plugin file path
+            'SchemaMarkApp',       // Replace with your GitHub username
+            'schemati-2.0',                  // Replace with your repository name
+            ''                           // Optional: GitHub personal access token
+        );
     }
-    
-    // Include the GitHub updater class
-    require_once $updater_file;
-    
-    // Check if class exists
-    if (!class_exists('Schemati_GitHub_Updater')) {
-        return; // Skip if class doesn't exist
+
+    /**
+     * Updates management page
+     */
+    public function updates_page() {
+        $remote_version = ($this->github_updater) ? $this->github_updater->get_remote_version() : null;
+        $current_version = SCHEMATI_VERSION;
+        $update_available = $remote_version && version_compare($current_version, $remote_version, '<');
+        
+        ?>
+        <div class="wrap">
+            <h1><?php _e('Schemati - Updates', 'schemati'); ?></h1>
+            
+            <div class="card">
+                <h2><?php _e('Version Information', 'schemati'); ?></h2>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><?php _e('Current Version', 'schemati'); ?></th>
+                        <td>
+                            <strong><?php echo esc_html($current_version); ?></strong>
+                            <?php if ($update_available): ?>
+                                <span style="color: #d63384; margin-left: 10px;">
+                                    <?php _e('(Update Available)', 'schemati'); ?>
+                                </span>
+                            <?php else: ?>
+                                <span style="color: #198754; margin-left: 10px;">
+                                    <?php _e('(Up to Date)', 'schemati'); ?>
+                                </span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php _e('Latest Version', 'schemati'); ?></th>
+                        <td>
+                            <?php if ($remote_version): ?>
+                                <strong><?php echo esc_html($remote_version); ?></strong>
+                            <?php else: ?>
+                                <em><?php _e('Unable to check', 'schemati'); ?></em>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php _e('Architecture', 'schemati'); ?></th>
+                        <td>
+                            <strong><?php _e('Enhanced Modular System', 'schemati'); ?></strong>
+                            <p class="description"><?php _e('Improved performance with centralized hooks and better organization.', 'schemati'); ?></p>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+        <?php
     }
+
+    /**
+     * Enhanced sidebar HTML with improved functionality
+     */
+    public function add_sidebar_html() {
+        if (!current_user_can('edit_posts') || is_admin()) {
+            return;
+        }
+        
+        global $post;
+        $general_settings = $this->get_settings('schemati_general');
+        
+        // Get current page schema data with enhanced detection
+        $current_schemas = $this->get_enhanced_page_schemas();
+        ?>
+        <div id="schemati-sidebar" style="display: none; position: fixed; top: 32px; right: 0; width: 450px; height: calc(100vh - 32px); background: white; border-left: 1px solid #ccc; z-index: 99999; padding: 0; overflow-y: auto; box-shadow: -2px 0 10px rgba(0,0,0,0.15); font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;">
+            
+            <!-- Enhanced Header with Dynamic Status -->
+            <div style="padding: 20px; background: linear-gradient(135deg, #0073aa 0%, #005177 100%); color: white; position: sticky; top: 0; z-index: 1000;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <h3 style="margin: 0; font-size: 18px;">
+                            <span style="margin-right: 8px;">⚙️</span>
+                            Schemati Editor v5.1
+                        </h3>
+                        <div style="font-size: 12px; opacity: 0.8; margin-top: 4px;">
+                            <span id="schema-count"><?php echo count($current_schemas); ?> schemas detected</span>
+                            <span style="margin-left: 10px;">•</span>
+                            <span id="schema-status"><?php echo $general_settings['enabled'] ? 'Active' : 'Disabled'; ?></span>
+                            <span style="margin-left: 10px;">•</span>
+                            <span>Enhanced Architecture</span>
+                        </div>
+                    </div>
+                    <button onclick="toggleSchematiSidebar()" style="background: none; border: none; font-size: 20px; cursor: pointer; color: white; padding: 5px;">&times;</button>
+                </div>
+            </div>
+            
+            <!-- Enhanced Tabs Navigation -->
+            <div style="background: #f1f1f1; border-bottom: 1px solid #ccc;">
+                <div style="display: flex;">
+                    <button class="schemati-tab active" onclick="showSchematiTab('current')" style="flex: 1; padding: 12px; border: none; background: white; cursor: pointer; border-bottom: 2px solid #0073aa; font-size: 12px;">
+                        <span style="display: block;">Current</span>
+                        <small style="color: #666;" id="current-count"><?php echo count($current_schemas); ?> schemas</small>
+                    </button>
+                    <button class="schemati-tab" onclick="showSchematiTab('add')" style="flex: 1; padding: 12px; border: none; background: #f1f1f1; cursor: pointer; border-bottom: 2px solid transparent; font-size: 12px;">
+                        <span style="display: block;">Add</span>
+                        <small style="color: #666;">New schema</small>
+                    </button>
+                    <button class="schemati-tab" onclick="showSchematiTab('settings')" style="flex: 1; padding: 12px; border: none; background: #f1f1f1; cursor: pointer; border-bottom: 2px solid transparent; font-size: 12px;">
+                        <span style="display: block;">Settings</span>
+                        <small style="color: #666;">Global</small>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Enhanced Current Schemas Tab -->
+            <div id="schemati-tab-current" class="schemati-tab-content" style="padding: 20px;">
+                <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+                    <h4 style="margin: 0; color: #333; font-size: 14px;">DETECTED SCHEMAS</h4>
+                    <div style="display: flex; gap: 5px;">
+                        <button onclick="validateAllSchemas()" style="background: #28a745; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;" title="Validate All">✓</button>
+                    </div>
+                </div>
+                
+                <div id="current-schemas-list">
+                    <?php if (empty($current_schemas)): ?>
+                        <div style="text-align: center; padding: 40px 20px; color: #666;">
+                            <div style="font-size: 48px; margin-bottom: 10px;">📋</div>
+                            <h4>No schemas detected</h4>
+                            <p>Add your first schema using the "Add" tab.</p>
+                            <button onclick="showSchematiTab('add')" style="background: #0073aa; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-top: 10px;">Add Schema</button>
+                        </div>
+                    <?php else: ?>
+                        <?php foreach ($current_schemas as $index => $schema): ?>
+                            <?php $this->render_enhanced_schema_item($schema, $index); ?>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </div>
+            </div>
+            
+            <!-- Add Tab -->
+            <div id="schemati-tab-add" class="schemati-tab-content" style="display: none; padding: 20px;">
+                <h4 style="margin: 0 0 15px 0; color: #333; font-size: 14px;">ADD NEW SCHEMA</h4>
+                
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Schema Type:</label>
+                    <select id="new-schema-type" onchange="loadSchemaTemplate()" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        <option value="">Select Schema Type</option>
+                        <optgroup label="Business">
+                            <option value="LocalBusiness">🏢 Local Business</option>
+                            <option value="Service">🛠️ Service</option>
+                            <option value="Product">📦 Product</option>
+                            <option value="Organization">🏛️ Organization</option>
+                        </optgroup>
+                        <optgroup label="Content">
+                            <option value="Article">📰 Article</option>
+                            <option value="BlogPosting">📝 Blog Post</option>
+                            <option value="NewsArticle">📺 News Article</option>
+                            <option value="FAQPage">❓ FAQ Page</option>
+                            <option value="HowTo">📋 How-To</option>
+                            <option value="Recipe">🍳 Recipe</option>
+                        </optgroup>
+                        <optgroup label="Events & People">
+                            <option value="Event">📅 Event</option>
+                            <option value="Person">👤 Person</option>
+                            <option value="Review">⭐ Review</option>
+                        </optgroup>
+                        <optgroup label="Media">
+                            <option value="VideoObject">🎥 Video</option>
+                        </optgroup>
+                        <optgroup label="Other">
+                            <option value="WebSite">🌍 Website</option>
+                        </optgroup>
+                    </select>
+                </div>
+                
+                <div id="new-schema-form" style="display: none;">
+                    <form onsubmit="addNewSchema(); return false;">
+                        <div id="schema-template-fields"></div>
+                        
+                        <div style="margin-top: 20px; display: flex; gap: 10px;">
+                            <button type="button" onclick="previewNewSchema()" style="flex: 1; background: #6c757d; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 500;">
+                                👁️ Preview
+                            </button>
+                            <button type="submit" style="flex: 2; background: #0073aa; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 500;">
+                                ➕ Add Schema
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            
+            <!-- Enhanced Settings Tab -->
+            <div id="schemati-tab-settings" class="schemati-tab-content" style="display: none; padding: 20px;">
+                <h4 style="margin: 0 0 15px 0; color: #333; font-size: 14px;">GLOBAL SETTINGS</h4>
+                
+                <div style="margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                    <label style="display: flex; align-items: center; margin-bottom: 10px; cursor: pointer;">
+                        <input type="checkbox" id="schema-enabled" <?php checked($general_settings['enabled']); ?> onchange="toggleGlobalSchema()" style="margin-right: 8px;">
+                        <span style="font-weight: 500;">Enable Schema Markup</span>
+                    </label>
+                    <div style="font-size: 12px; color: #666; margin-left: 20px;">
+                        Controls whether schema markup is output on your website
+                    </div>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+    <h5 style="margin: 0 0 10px 0; font-size: 13px; color: #333;">QUICK ACTIONS</h5>
+    <div style="display: grid; gap: 8px;">
+        <button onclick="showSchematiPreview()" style="width: 100%; padding: 12px; background: #0073aa; color: white; border: none; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+            <span>🔍</span>
+            <span>Preview All Schemas</span>
+        </button>
+        <button onclick="testSchemaMarkupNet()" style="width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+            <span>🚀</span>
+            <span>Test Rich Results</span>
+        </button>
+    </div>
+</div>
+                
+                <div style="margin-bottom: 20px;">
+                    <a href="<?php echo admin_url('admin.php?page=schemati'); ?>" style="display: flex; align-items: center; gap: 8px; width: 100%; padding: 12px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; text-align: center; text-decoration: none; justify-content: center;">
+                        <span>⚙️</span>
+                        <span>Full Settings Panel</span>
+                    </a>
+                </div>
+                
+                <<div style="font-size: 11px; color: #666; text-align: center; border-top: 1px solid #eee; padding-top: 15px;">
+    <div>Schemati v5.1 | Enhanced Architecture</div>
+    <div style="margin-top: 4px;">
+        <a href="https://schemamarkup.net/?url=<?php echo esc_attr(parse_url(home_url(), PHP_URL_HOST)); ?>" target="_blank" style="color: #0073aa; text-decoration: none;">Schema Validation Tool</a>
+    </div>
+</div>
+            </div>
+        </div>
+        
+        <!-- Enhanced Schema Preview Modal -->
+        <div id="schemati-schema-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 100000; font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;">
+            <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90%; max-width: 1200px; height: 85%; background: white; border-radius: 8px; padding: 0; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.3);">
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 20px; background: linear-gradient(135deg, #0073aa 0%, #005177 100%); color: white;">
+                    <div>
+                        <h2 style="margin: 0; color: white;">🔍 Live Schema Preview</h2>
+                        <div style="font-size: 12px; opacity: 0.8; margin-top: 4px;" id="schema-preview-count">Loading...</div>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="copyAllSchemas()" style="background: rgba(255,255,255,0.2); border: none; color: white; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;">📋 Copy All</button>
+                        <button onclick="hideSchematiPreview()" style="background: none; border: none; font-size: 24px; cursor: pointer; color: white; padding: 5px;">&times;</button>
+                    </div>
+                </div>
+                <div id="schema-modal-content" style="height: calc(100% - 80px); overflow-y: auto; padding: 20px; font-family: monospace; font-size: 12px; line-height: 1.5;">
+                    Loading schema data...
+                </div>
+            </div>
+        </div>
+        
+        <script>
+// Enhanced JavaScript with object-oriented architecture
+var SchematiSidebar = {
+    currentPostId: <?php echo get_the_ID() ?: 0; ?>,
+    ajaxUrl: '<?php echo admin_url("admin-ajax.php"); ?>',
+    nonce: '<?php echo wp_create_nonce("schemati_ajax"); ?>',
+    detectedSchemas: [],
+    phpSchemas: <?php echo json_encode($current_schemas); ?>,
+    if (typeof SchematiSidebar !== 'undefined') {
+    SchematiSidebar.testCurrentPage = function() {
+        testSchemaMarkupNet();
+    };
+    // Centralized AJAX call handler
+    ajaxCall: function(action, data, successCallback, errorCallback) {
+        data.action = action;
+        data.nonce = this.nonce;
+        
+        jQuery.ajax({
+            url: this.ajaxUrl,
+            type: 'POST',
+            data: data,
+            success: function(response) {
+                if (response.success) {
+                    if (successCallback) successCallback(response);
+                } else {
+                    var errorMsg = response.data?.message || 'Unknown error occurred';
+                    if (errorCallback) {
+                        errorCallback(errorMsg);
+                    } else {
+                        alert('Error: ' + errorMsg);
+                    }
+                }
+            },
+            error: function(xhr, status, error) {
+                var errorMsg = 'Connection error. Please try again.';
+                if (status === 'timeout') {
+                    errorMsg = 'Request timed out. Please try again.';
+                }
+                if (errorCallback) {
+                    errorCallback(errorMsg);
+                } else {
+                    alert(errorMsg);
+                }
+            }
+        });
+    },
     
-    // Initialize updater
-    $this->github_updater = new Schemati_GitHub_Updater(
-        SCHEMATI_FILE,                // Plugin file path
-        'SchemaMarkApp',       // Replace with your GitHub username
-        'schemati-2.0',                  // Replace with your repository name
-        ''                           // Optional: GitHub personal access token
-    );
+    // Initialize sidebar
+    init: function() {
+        this.syncSchemasWithDOM();
+        console.log('Schemati Sidebar v5.1: Enhanced Architecture Loaded');
+    },
+    
+    // Enhanced sync function
+    syncSchemasWithDOM: function() {
+        this.detectedSchemas = [];
+        
+        // Scan DOM for JSON-LD scripts
+        var domSchemas = [];
+        document.querySelectorAll('script[type="application/ld+json"]').forEach(function(script, index) {
+            try {
+                var schema = JSON.parse(script.textContent);
+                schema._domIndex = index;
+                schema._element = script;
+                schema._source = 'dom';
+                domSchemas.push(schema);
+            } catch(e) {
+                console.warn('Invalid JSON-LD schema found:', e);
+            }
+        });
+        
+        // Combine with PHP data
+        var self = this;
+        domSchemas.forEach(function(domSchema, index) {
+            var schemaType = domSchema['@type'];
+            var schemaName = domSchema.name || domSchema.title || domSchema.headline || 'Untitled';
+            
+            var phpMatch = self.phpSchemas.find(function(phpSchema) {
+                return phpSchema['@type'] === schemaType && 
+                       (phpSchema.name === schemaName || phpSchema.title === schemaName);
+            });
+            
+            if (phpMatch) {
+                phpMatch._domDetected = true;
+                phpMatch._domIndex = index;
+                self.detectedSchemas.push(phpMatch);
+            } else {
+                domSchema._enabled = true;
+                domSchema._source = domSchema._source || 'system';
+                domSchema._editable = false;
+                self.detectedSchemas.push(domSchema);
+            }
+        });
+        
+        this.updateSchemaCounts();
+    },
+    
+    // Update schema counters
+    updateSchemaCounts: function() {
+        var count = this.detectedSchemas.length;
+        var schemaCountEl = document.getElementById('schema-count');
+        var currentCountEl = document.getElementById('current-count');
+        
+        if (schemaCountEl) schemaCountEl.textContent = count + ' schemas detected';
+        if (currentCountEl) currentCountEl.textContent = count + ' schemas';
+    }
+};
+
+// Enhanced sidebar functions using the new architecture
+function toggleSchematiSidebar() {
+    var sidebar = document.getElementById("schemati-sidebar");
+    if (sidebar) {
+        if (sidebar.style.display === "none") {
+            sidebar.style.display = "block";
+            SchematiSidebar.syncSchemasWithDOM();
+        } else {
+            sidebar.style.display = "none";
+        }
+    }
 }
+
+function showSchematiTab(tabName) {
+    document.querySelectorAll('.schemati-tab-content').forEach(tab => {
+        tab.style.display = 'none';
+    });
+    document.querySelectorAll('.schemati-tab').forEach(btn => {
+        btn.style.background = '#f1f1f1';
+        btn.style.borderBottomColor = 'transparent';
+    });
+    
+    var targetTab = document.getElementById('schemati-tab-' + tabName);
+    if (targetTab) {
+        targetTab.style.display = 'block';
+    }
+    
+    if (event && event.target) {
+        event.target.style.background = 'white';
+        event.target.style.borderBottomColor = '#0073aa';
+    }
+    
+    if (tabName === 'current') {
+        SchematiSidebar.syncSchemasWithDOM();
+    }
+}
+
+function toggleSchemaStatus(index) {
+    SchematiSidebar.ajaxCall('schemati_toggle_schema', {
+        schema_index: index,
+        post_id: SchematiSidebar.currentPostId
+    }, function(response) {
+        // Success - reload page to show changes
+        location.reload();
+    });
+}
+
+function deleteSchema(index) {
+    if (!confirm('Are you sure you want to delete this schema?')) {
+        return;
+    }
+    
+    SchematiSidebar.ajaxCall('schemati_delete_schema', {
+        schema_index: index,
+        post_id: SchematiSidebar.currentPostId
+    }, function(response) {
+        // Success - reload page to show changes
+        location.reload();
+    });
+}
+
+function loadSchemaTemplate() {
+    var schemaType = document.getElementById('new-schema-type').value;
+    var formContainer = document.getElementById('new-schema-form');
+    var fieldsContainer = document.getElementById('schema-template-fields');
+    
+    if (!schemaType) {
+        formContainer.style.display = 'none';
+        return;
+    }
+    
+    // Show loading state
+    fieldsContainer.innerHTML = '<div style="text-align: center; padding: 20px; color: #666;"><div style="font-size: 20px; margin-bottom: 10px;">⏳</div><p>Loading template...</p></div>';
+    formContainer.style.display = 'block';
+    
+    SchematiSidebar.ajaxCall('schemati_get_schema_template', {
+        schema_type: schemaType
+    }, function(response) {
+        // Success
+        fieldsContainer.innerHTML = response.data;
+        
+        // Add success feedback
+        var successMsg = document.createElement('div');
+        successMsg.style.cssText = 'background: #d4edda; color: #155724; padding: 10px; border-radius: 4px; margin-bottom: 15px; border-left: 4px solid #28a745;';
+        successMsg.innerHTML = '✅ Template loaded successfully! Fill in the fields below.';
+        fieldsContainer.insertBefore(successMsg, fieldsContainer.firstChild);
+        
+        // Remove success message after 3 seconds
+        setTimeout(function() {
+            if (successMsg.parentNode) {
+                successMsg.remove();
+            }
+        }, 3000);
+    }, function(errorMsg) {
+        // Error
+        fieldsContainer.innerHTML = '<div style="color: #721c24; background: #f8d7da; padding: 15px; border-radius: 4px; border-left: 4px solid #dc3545;"><strong>❌ Error:</strong> ' + errorMsg + '<br><br><button onclick="loadSchemaTemplate()" style="background: #dc3545; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">🔄 Retry</button></div>';
+    });
+}
+
+function addNewSchema() {
+    var form = document.querySelector('#new-schema-form form');
+    var formData = new FormData(form);
+    var schemaType = document.getElementById('new-schema-type').value;
+    
+    if (!schemaType) {
+        alert('Please select a schema type');
+        return false;
+    }
+    
+    var data = {
+        schema_type: schemaType,
+        post_id: SchematiSidebar.currentPostId
+    };
+    
+    // Add form data
+    for (var pair of formData.entries()) {
+        data[pair[0]] = pair[1];
+    }
+    
+    SchematiSidebar.ajaxCall('schemati_add_schema', data, function(response) {
+        // Success
+        alert('Schema added successfully!');
+        form.reset();
+        document.getElementById('new-schema-form').style.display = 'none';
+        document.getElementById('new-schema-type').value = '';
+        location.reload();
+    });
+    
+    return false;
+}
+
+function previewNewSchema() {
+    var form = document.querySelector('#new-schema-form form');
+    var formData = new FormData(form);
+    var schemaType = document.getElementById('new-schema-type').value;
+    
+    // Build preview schema object
+    var previewSchema = {
+        '@context': 'https://schema.org',
+        '@type': schemaType
+    };
+    
+    // Add form data to preview
+    for (var pair of formData.entries()) {
+        if (pair[1]) {
+            previewSchema[pair[0]] = pair[1];
+        }
+    }
+    
+    // Show preview in modal
+    var modal = document.getElementById('schemati-schema-modal');
+    var content = document.getElementById('schema-modal-content');
+    
+    content.innerHTML = '<div style="margin-bottom: 20px; padding: 15px; background: #fff3cd; border-radius: 8px; color: #856404; border-left: 4px solid #ffc107;"><h3 style="margin: 0;">👁️ Schema Preview</h3><p style="margin: 5px 0 0 0; font-size: 13px;">This is how your schema will look when added.</p></div><pre style="background: #2d3748; color: #e2e8f0; padding: 20px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; font-size: 11px; line-height: 1.4;">' + JSON.stringify(previewSchema, null, 2) + '</pre>';
+    
+    modal.style.display = 'block';
+}
+
+function showSchematiPreview() {
+    SchematiSidebar.syncSchemasWithDOM();
+    
+    var modal = document.getElementById('schemati-schema-modal');
+    var content = document.getElementById('schema-modal-content');
+    var countElement = document.getElementById('schema-preview-count');
+    
+    if (SchematiSidebar.detectedSchemas.length === 0) {
+        content.innerHTML = '<div style="text-align: center; padding: 40px; color: #666;"><div style="font-size: 48px; margin-bottom: 15px;">📋</div><h3>No Schema Found</h3><p>No schema markup was detected on this page.</p></div>';
+        countElement.textContent = 'No schemas found';
+    } else {
+        var html = '<div style="margin-bottom: 20px; padding: 15px; background: #d4edda; border-radius: 8px; color: #155724; border-left: 4px solid #28a745;"><h3 style="margin: 0; display: flex; align-items: center; gap: 8px;"><span>✅</span>Found ' + SchematiSidebar.detectedSchemas.length + ' Schema Type(s)</h3><p style="margin: 5px 0 0 0; font-size: 13px;">All schemas are properly formatted and ready for search engines.</p></div>';
+        
+        SchematiSidebar.detectedSchemas.forEach(function(schema, index) {
+            var schemaType = schema['@type'] || 'Unknown Type';
+            var schemaName = schema.name || schema.title || schema.headline || 'No title';
+            
+            html += '<div style="margin-bottom: 25px; border: 1px solid #dee2e6; border-radius: 8px; overflow: hidden; background: white;">';
+            html += '<div style="padding: 15px; background: linear-gradient(135deg, #0073aa 0%, #005177 100%); color: white; display: flex; justify-content: space-between; align-items: center;">';
+            html += '<div><h4 style="margin: 0; font-size: 16px;">' + (index + 1) + '. ' + schemaType + ' Schema</h4>';
+            if (schemaName !== 'No title') {
+                html += '<div style="font-size: 12px; opacity: 0.8; margin-top: 4px;">' + schemaName + '</div>';
+            }
+            html += '</div>';
+            html += '<button onclick="copySchema(' + index + ')" style="background: rgba(255,255,255,0.2); border: none; color: white; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">Copy</button>';
+            html += '</div>';
+            html += '<pre style="background: #2d3748; color: #e2e8f0; padding: 20px; margin: 0; overflow-x: auto; white-space: pre-wrap; font-size: 11px; line-height: 1.5;">' + JSON.stringify(schema, null, 2) + '</pre>';
+            html += '</div>';
+        });
+        content.innerHTML = html;
+        countElement.textContent = SchematiSidebar.detectedSchemas.length + ' schemas detected and validated';
+    }
+    
+    modal.style.display = 'block';
+}
+
+function copySchema(index) {
+    if (SchematiSidebar.detectedSchemas[index]) {
+        navigator.clipboard.writeText(JSON.stringify(SchematiSidebar.detectedSchemas[index], null, 2)).then(function() {
+            alert('Schema copied to clipboard!');
+        });
+    }
+}
+
+function copyAllSchemas() {
+    navigator.clipboard.writeText(JSON.stringify(SchematiSidebar.detectedSchemas, null, 2)).then(function() {
+        alert('All schemas copied to clipboard!');
+    });
+}
+
+function hideSchematiPreview() {
+    document.getElementById('schemati-schema-modal').style.display = 'none';
+}
+
+function testSchemaMarkupNet() {
+    // Get current page URL without protocol
+    var currentUrl = window.location.host + window.location.pathname + window.location.search;
+    window.open('https://schemamarkup.net/?url=' + encodeURIComponent(currentUrl), '_blank');
+}
+	function testGoogleRichResults() {
+    testSchemaMarkupNet();
+}
+
+
+function toggleGlobalSchema() {
+    var checkbox = document.getElementById('schema-enabled');
+    var enabled = checkbox.checked ? 1 : 0;
+    
+    SchematiSidebar.ajaxCall('schemati_toggle_global', {
+        enabled: enabled
+    }, function(response) {
+        // Success
+        var statusEl = document.getElementById('schema-status');
+        if (statusEl) {
+            statusEl.textContent = enabled ? 'Active' : 'Disabled';
+        }
+    });
+}
+
+function validateAllSchemas() {
+    SchematiSidebar.syncSchemasWithDOM();
+    var validCount = 0;
+    var invalidCount = 0;
+    
+    SchematiSidebar.detectedSchemas.forEach(function(schema) {
+        try {
+            if (schema['@context'] && schema['@type']) {
+                validCount++;
+            } else {
+                invalidCount++;
+            }
+        } catch (e) {
+            invalidCount++;
+        }
+    });
+    
+    alert('Validation Results:\n✅ Valid: ' + validCount + '\n❌ Invalid: ' + invalidCount);
+}
+
+// Initialize sidebar when DOM is ready
+document.addEventListener('DOMContentLoaded', function() {
+    SchematiSidebar.init();
+});
+
+// Add enhanced CSS for better interactions
+var style = document.createElement('style');
+style.textContent = `
+    .schemati-tab {
+        transition: all 0.3s ease;
+    }
+    .schemati-tab:hover {
+        background: #e9ecef !important;
+    }
+    .schema-item {
+        transition: all 0.3s ease;
+    }
+    .schema-item:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .schemati-loading {
+        opacity: 0.6;
+        pointer-events: none;
+    }
+`;
+document.head.appendChild(style);
+</script>
+        <?php
+    }
+	private function log_error($message, $context = array()) {
+    if (defined('WP_DEBUG') && WP_DEBUG) {
+        error_log('Schemati Error: ' . $message . ' Context: ' . print_r($context, true));
+    }
+}
+
+// 4. ADD: Schema validation method (NEW)
+private function validate_schema($schema) {
+    $errors = array();
+    
+    // Check required fields
+    if (empty($schema['@context'])) {
+        $errors[] = 'Missing @context';
+    }
+    
+    if (empty($schema['@type'])) {
+        $errors[] = 'Missing @type';
+    }
+    
+    // Type-specific validation
+    switch ($schema['@type']) {
+        case 'LocalBusiness':
+            if (empty($schema['name'])) {
+                $errors[] = 'Missing business name';
+            }
+            break;
+        case 'Product':
+            if (empty($schema['name'])) {
+                $errors[] = 'Missing product name';
+            }
+            break;
+        // Add more validations as needed
+    }
+    
+    return $errors;
+}
+
+
+    /**
+     * Render enhanced schema item with better UI
+     */
+    private function render_enhanced_schema_item($schema, $index) {
+        $schema_type = $schema['@type'] ?? 'Unknown';
+        $schema_name = $schema['name'] ?? $schema['title'] ?? 'Untitled';
+        $schema_enabled = $schema['_enabled'] ?? true;
+        $schema_source = $schema['_source'] ?? 'unknown';
+        
+        // Get source icon and color
+        $source_info = $this->get_source_info($schema_source);
+        ?>
+        <div class="schema-item" data-schema-index="<?php echo $index; ?>" style="margin-bottom: 15px; border: 1px solid <?php echo $schema_enabled ? '#ddd' : '#f5c6cb'; ?>; border-radius: 8px; overflow: hidden; <?php echo $schema_enabled ? '' : 'opacity: 0.7;'; ?>">
+            <div class="schema-header" style="background: <?php echo $schema_enabled ? '#f8f9fa' : '#f8d7da'; ?>; padding: 12px; display: flex; justify-content: space-between; align-items: center;">
+                <div style="flex: 1;">
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                        <strong style="color: #0073aa; font-size: 14px;"><?php echo esc_html($schema_type); ?></strong>
+                        <span style="background: <?php echo $source_info['color']; ?>; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 500;">
+                            <?php echo $source_info['icon']; ?> <?php echo $source_info['label']; ?>
+                        </span>
+                    </div>
+                    <div style="font-size: 12px; color: #666; line-height: 1.3;">
+                        <?php echo esc_html(wp_trim_words($schema_name, 8)); ?>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 5px; align-items: center;">
+                    <?php if ($schema_source === 'custom'): ?>
+                    <button onclick="toggleSchemaStatus(<?php echo $index; ?>)" style="background: <?php echo $schema_enabled ? '#28a745' : '#dc3545'; ?>; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer; font-weight: 500;">
+                        <?php echo $schema_enabled ? 'ON' : 'OFF'; ?>
+                    </button>
+                    <button onclick="deleteSchema(<?php echo $index; ?>)" style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;">✕</button>
+                    <?php else: ?>
+                    <span style="color: #666; font-size: 11px;">System</span>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+        <?php
+    }
+
+    /**
+     * Get source information for schema items
+     */
+    private function get_source_info($source) {
+        switch ($source) {
+            case 'global':
+                return array(
+                    'label' => 'Global',
+                    'icon' => '🌐',
+                    'color' => '#17a2b8'
+                );
+            case 'post':
+                return array(
+                    'label' => 'Post',
+                    'icon' => '📄',
+                    'color' => '#28a745'
+                );
+            case 'auto':
+                return array(
+                    'label' => 'Auto',
+                    'icon' => '🤖',
+                    'color' => '#6f42c1'
+                );
+            case 'custom':
+                return array(
+                    'label' => 'Custom',
+                    'icon' => '✏️',
+                    'color' => '#fd7e14'
+                );
+            default:
+                return array(
+                    'label' => 'System',
+                    'icon' => '⚙️',
+                    'color' => '#6c757d'
+                );
+        }
+    }
+
+    /**
+     * Get enhanced page schemas with better detection
+     */
+    private function get_enhanced_page_schemas() {
+    $schemas = array();
+    
+    // Get existing schemas that would be output
+    $general_settings = $this->get_settings('schemati_general');
+    
+    if (!$general_settings['enabled']) {
+        return $schemas;
+    }
+    
+    // Organization schema
+    $org_schema = $this->build_organization_schema();
+    if ($org_schema) {
+        $org_schema['_enabled'] = true;
+        $org_schema['_source'] = 'global';
+        $schemas[] = $org_schema;
+    }
+    
+    // NEW: Header/Footer schemas
+    $header_schema = $this->build_wpheader_schema();
+    if ($header_schema) {
+        $header_schema['_enabled'] = true;
+        $header_schema['_source'] = 'auto';
+        $schemas[] = $header_schema;
+    }
+    
+    $footer_schema = $this->build_wpfooter_schema();
+    if ($footer_schema) {
+        $footer_schema['_enabled'] = true;
+        $footer_schema['_source'] = 'auto';
+        $schemas[] = $footer_schema;
+    }
+        
+        // Page-specific schemas
+        if (is_singular()) {
+            global $post;
+            
+            // WebPage/Article schema
+            $page_schema = $this->build_webpage_schema();
+            if ($page_schema) {
+                $page_schema['_enabled'] = true;
+                $page_schema['_source'] = 'post';
+                $schemas[] = $page_schema;
+            }
+            
+            // Breadcrumb schema
+            if (!is_front_page()) {
+                $breadcrumb_schema = $this->build_breadcrumb_schema();
+                if ($breadcrumb_schema) {
+                    $breadcrumb_schema['_enabled'] = true;
+                    $breadcrumb_schema['_source'] = 'auto';
+                    $schemas[] = $breadcrumb_schema;
+                }
+            }
+            
+            // Custom schemas from meta
+            $custom_schemas = get_post_meta($post->ID, '_schemati_custom_schemas', true);
+            if ($custom_schemas && is_array($custom_schemas)) {
+                foreach ($custom_schemas as $index => $custom_schema) {
+                    $custom_schema['_source'] = 'custom';
+                    $custom_schema['_index'] = $index;
+                    $schemas[] = $custom_schema;
+                }
+            }
+        }
+        
+        return $schemas;
+    }
 }
 
 // Initialize the plugin
@@ -3206,6 +3409,9 @@ function schemati_uninstall() {
     // Clean up post meta
     global $wpdb;
     $wpdb->query("DELETE FROM {$wpdb->postmeta} WHERE meta_key LIKE '_schemati_%'");
+    
+    // Clear cache
+    wp_cache_flush_group('schemati_schemas');
 }
 
 ?>

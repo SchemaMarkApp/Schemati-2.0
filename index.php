@@ -2270,7 +2270,7 @@ private function display_export_statistics() {
     /**
      * Enqueue sidebar scripts
      */
-    ublic function enqueue_sidebar_scripts() {
+    public function enqueue_sidebar_scripts() {
     if (!current_user_can('edit_posts') || is_admin()) {
         return;
     }
@@ -2586,146 +2586,144 @@ if ($footer_schema) {
      * Initialize GitHub updater
      */
     private function init_github_updater() {
-        // Check if the updater file exists
-        $updater_file = SCHEMATI_DIR . 'includes/class-github-updater.php';
-        
-        if (!file_exists($updater_file)) {
-            return; // Skip if file doesn't exist
-        }
-        
-        // Include the GitHub updater class
-        require_once $updater_file;
-        
-        // Check if class exists
-        if (!class_exists('Schemati_GitHub_Updater')) {
-            return; // Skip if class doesn't exist
-        }
-        
-        // Initialize updater
-        $this->github_updater = new Schemati_GitHub_Updater(
-            SCHEMATI_FILE,                // Plugin file path
-            'SchemaMarkApp',       // Replace with your GitHub username
-            'schemati-2.0',                  // Replace with your repository name
-            ''                           // Optional: GitHub personal access token
-        );
+    $updater_file = SCHEMATI_DIR . 'includes/class-github-updater.php';
+    
+    if (!file_exists($updater_file)) {
+        return;
     }
+    
+    require_once $updater_file;
+    
+    if (!class_exists('Schemati_GitHub_Updater')) {
+        return;
+    }
+    
+    // Initialize enhanced updater
+    $this->github_updater = new Schemati_GitHub_Updater(
+        SCHEMATI_FILE,
+        'YourGitHubUsername',    // Replace with actual username
+        'your-repo-name',        // Replace with actual repo
+        ''                       // Optional access token
+    );
+}
 
     /**
      * Updates management page
      */
     public function updates_page() {
-    $remote_version = ($this->github_updater) ? $this->github_updater->get_remote_version() : null;
-    $current_version = SCHEMATI_VERSION;
-    $update_available = $remote_version && version_compare($current_version, $remote_version, '<');
+    // Get status from enhanced updater
+    $status = $this->github_updater ? $this->github_updater->get_update_status() : null;
+    $update_available = $status && $status['update_available'];
     
     ?>
     <div class="wrap">
         <h1><?php _e('Schemati - Updates', 'schemati'); ?></h1>
         
+        <?php if ($status): ?>
         <div class="card">
-            <h2><?php _e('Version Information', 'schemati'); ?></h2>
+            <h2><?php _e('Update Status', 'schemati'); ?></h2>
             <table class="form-table">
                 <tr>
                     <th scope="row"><?php _e('Current Version', 'schemati'); ?></th>
                     <td>
-                        <strong><?php echo esc_html($current_version); ?></strong>
+                        <strong><?php echo esc_html($status['current_version']); ?></strong>
                         <?php if ($update_available): ?>
-                            <span style="color: #d63384; margin-left: 10px;">
-                                <?php _e('(Update Available)', 'schemati'); ?>
-                            </span>
+                            <span style="color: #d63384; margin-left: 10px;">⚠️ Update Available</span>
                         <?php else: ?>
-                            <span style="color: #198754; margin-left: 10px;">
-                                <?php _e('(Up to Date)', 'schemati'); ?>
-                            </span>
+                            <span style="color: #198754; margin-left: 10px;">✅ Up to Date</span>
                         <?php endif; ?>
                     </td>
                 </tr>
                 <tr>
                     <th scope="row"><?php _e('Latest Version', 'schemati'); ?></th>
                     <td>
-                        <?php if ($remote_version): ?>
-                            <strong><?php echo esc_html($remote_version); ?></strong>
-                        <?php else: ?>
-                            <em><?php _e('Unable to check', 'schemati'); ?></em>
-                        <?php endif; ?>
+                        <strong><?php echo esc_html($status['remote_version'] ?: 'Checking...'); ?></strong>
                     </td>
                 </tr>
                 <tr>
-                    <th scope="row"><?php _e('Update Source', 'schemati'); ?></th>
+                    <th scope="row"><?php _e('Last Check', 'schemati'); ?></th>
                     <td>
-                        <a href="https://github.com/SchemaMarkApp/schemati-2.0" target="_blank">
-                            GitHub Repository
-                        </a>
+                        <?php 
+                        if ($status['last_check']) {
+                            echo human_time_diff($status['last_check']) . ' ago';
+                        } else {
+                            echo 'Never';
+                        }
+                        ?>
                     </td>
                 </tr>
             </table>
-        </div>
-        
-        <?php if ($update_available): ?>
-        <div class="card">
-            <h2><?php _e('Update Available', 'schemati'); ?></h2>
-            <p><?php printf(__('A new version (%s) is available for download.', 'schemati'), $remote_version); ?></p>
-            
-            <?php
-            $plugin_slug = plugin_basename(SCHEMATI_FILE);
-            $update_url = wp_nonce_url(
-                self_admin_url('update.php?action=upgrade-plugin&plugin=' . urlencode($plugin_slug)),
-                'upgrade-plugin_' . $plugin_slug
-            );
-            ?>
             
             <p>
-                <a href="<?php echo esc_url($update_url); ?>" class="button button-primary">
-                    <?php _e('Update Now', 'schemati'); ?>
-                </a>
-                <a href="https://github.com/SchemaMarkApp/schemati-2.0/releases/latest" target="_blank" class="button button-secondary">
-                    <?php _e('View Release Notes', 'schemati'); ?>
-                </a>
-            </p>
-        </div>
-        <?php endif; ?>
-        
-        <div class="card">
-            <h2><?php _e('Manual Update Check', 'schemati'); ?></h2>
-            <p><?php _e('Click the button below to manually check for updates from GitHub.', 'schemati'); ?></p>
-            
-            <p>
-                <button type="button" onclick="checkForUpdates()" class="button button-secondary">
-                    <?php _e('Check for Updates', 'schemati'); ?>
+                <button type="button" onclick="schematiManualCheck()" class="button button-secondary">
+                    🔄 Check for Updates
+                </button>
+                <button type="button" onclick="schematiClearCache()" class="button">
+                    🗑️ Clear Cache
                 </button>
             </p>
         </div>
         
+        <?php if (!empty($status['errors'])): ?>
         <div class="card">
-            <h2><?php _e('Auto-Update Settings', 'schemati'); ?></h2>
-            <p><?php _e('Schemati checks for updates automatically:', 'schemati'); ?></p>
-            <ul>
-                <li><?php _e('Every 12 hours when accessing WordPress admin', 'schemati'); ?></li>
-                <li><?php _e('When visiting the Updates page', 'schemati'); ?></li>
-                <li><?php _e('When manually checking via the button above', 'schemati'); ?></li>
-            </ul>
+            <h2>Recent Update Errors</h2>
+            <?php foreach (array_slice($status['errors'], -3) as $error): ?>
+            <div class="notice notice-error inline">
+                <p><strong><?php echo esc_html($error['time']); ?>:</strong> <?php echo esc_html($error['message']); ?></p>
+            </div>
+            <?php endforeach; ?>
         </div>
+        <?php endif; ?>
+        
+        <?php else: ?>
+        <div class="notice notice-warning">
+            <p>GitHub updater not initialized. Please check your configuration.</p>
+        </div>
+        <?php endif; ?>
     </div>
     
     <script>
-    function checkForUpdates() {
-        var button = event.target;
-        button.textContent = 'Checking...';
-        button.disabled = true;
-        
-        // Clear cached data and reload page
-        fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
+    function schematiManualCheck() {
+        jQuery.ajax({
+            url: ajaxurl,
+            type: 'POST',
+            data: {
+                action: 'schemati_updater_check',
+                nonce: '<?php echo wp_create_nonce('schemati_updater_check'); ?>'
             },
-            body: 'action=schemati_clear_update_cache&nonce=<?php echo wp_create_nonce('schemati_clear_cache'); ?>'
-        }).then(function() {
-            location.reload();
-        }).catch(function() {
-            button.textContent = 'Check for Updates';
-            button.disabled = false;
-            alert('Update check failed. Please try again.');
+            beforeSend: function() {
+                jQuery('button').prop('disabled', true);
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert(response.data.message);
+                    location.reload();
+                } else {
+                    alert('Error: ' + response.data);
+                }
+            },
+            complete: function() {
+                jQuery('button').prop('disabled', false);
+            }
+        });
+    }
+    
+    function schematiClearCache() {
+        jQuery.ajax({
+            url: ajaxurl,
+            type: 'POST',
+            data: {
+                action: 'schemati_updater_clear_cache',
+                nonce: '<?php echo wp_create_nonce('schemati_updater_clear_cache'); ?>'
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert('Cache cleared successfully!');
+                    location.reload();
+                } else {
+                    alert('Error: ' + response.data);
+                }
+            }
         });
     }
     </script>
